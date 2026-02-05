@@ -1,5 +1,4 @@
-#execution_engine\container.py
-
+# execution_engine/container.py
 """Dependency injection container - wires all services together."""
 
 from execution_engine.infrastructure.postgres.repository import PostgresExecutionRepository
@@ -9,7 +8,6 @@ from execution_engine.infrastructure.postgres.domain_repository import (
     DeploymentRepository,
 )
 from execution_engine.infrastructure.postgres.node_repository import NodeRepository
-from execution_engine.infrastructure.postgres.config import settings
 
 from execution_engine.core.service import ExecutionService
 from execution_engine.core.events import MultiEventEmitter, PrintEventEmitter
@@ -64,3 +62,25 @@ domain_service = DomainService(
 node_manager_service = NodeManagerService(
     node_repo=node_repository,
 )
+
+
+# ============================================
+# EXPORTS (for easy importing)
+# ============================================
+
+__all__ = [
+    # Repositories
+    'execution_repository',
+    'template_repository',
+    'application_repository',
+    'deployment_repository',
+    'node_repository',
+    
+    # Services
+    'execution_service',
+    'domain_service',
+    'node_manager_service',
+    
+    # Events
+    'emitters',
+]
