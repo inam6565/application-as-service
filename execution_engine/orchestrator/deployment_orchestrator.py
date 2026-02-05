@@ -195,7 +195,7 @@ class DeploymentOrchestrator:
         
         print(f"[orchestrator] selected node: {node.node_name}")
         
-        # Create execution
+        # Create execution with agent URL
         execution = Execution(
             execution_id=uuid4(),
             tenant_id=deployment.tenant_id,
@@ -205,6 +205,7 @@ class DeploymentOrchestrator:
             runtime_type="docker",
             spec={
                 "node_id": str(node.node_id),
+                "agent_url": node.runtime_agent_url,  # ADD THIS
                 "container_spec": spec,
             },
         )
@@ -214,9 +215,6 @@ class DeploymentOrchestrator:
         self._execution_service.queue_execution(execution.execution_id)
         
         print(f"[orchestrator] created execution {execution.execution_id}")
-        
-        # For MVP: Return immediately with execution ID
-        # In production: Wait for execution to complete or use async callbacks
         
         result = {
             "execution_id": str(execution.execution_id),

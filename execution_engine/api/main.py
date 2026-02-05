@@ -1,5 +1,6 @@
 from fastapi import FastAPI
 from execution_engine.api.routes.executions import router as executions_router
+from execution_engine.api.routes.nodes import router as nodes_router
 
 app = FastAPI(title="Execution Engine API")
 
@@ -8,3 +9,4 @@ def health():
     return {"status": "ok"}
 
 app.include_router(executions_router)
+app.include_router(nodes_router)

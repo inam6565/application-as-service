@@ -45,3 +45,5 @@ class DatabaseSettings(BaseSettings):
 
 
 settings = DatabaseSettings()
+# Define the POSTGRES_DSN for import in other modules
+POSTGRES_DSN = settings.database_url
