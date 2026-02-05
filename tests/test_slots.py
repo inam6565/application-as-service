@@ -1,3 +1,5 @@
+#tests\test_slots.py
+
 """Test slot manager (Bug Fix #2 Verification)."""
 
 import pytest

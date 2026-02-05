@@ -1,3 +1,5 @@
+#tests\test_integration.py
+
 """Integration test - full workflow."""
 
 import pytest

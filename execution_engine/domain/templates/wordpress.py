@@ -1,3 +1,5 @@
+#execution_engine\domain\templates\wordpress.py
+
 """WordPress application template."""
 
 from execution_engine.domain.models import (

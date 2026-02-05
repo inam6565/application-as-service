@@ -1,3 +1,5 @@
+#execution_engine\core\models.py
+
 """Core domain models (business logic)."""
 
 from dataclasses import dataclass, field

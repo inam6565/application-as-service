@@ -1,3 +1,5 @@
+#execution_engine\executor\slots.py
+
 """Slot manager for controlling executor concurrency."""
 
 from typing import Optional

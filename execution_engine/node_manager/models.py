@@ -1,3 +1,5 @@
+#execution_engine\node_manager\models.py
+
 """Infrastructure node models."""
 
 from dataclasses import dataclass, field

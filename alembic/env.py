@@ -1,3 +1,5 @@
+#alembic\env.py
+
 """Alembic environment configuration."""
 
 from logging.config import fileConfig
