@@ -1,7 +1,7 @@
-#execution_engine\orchestrator\deployment_orchestrator.py
-
+# execution_engine/orchestrator/deployment_orchestrator.py
 """Deployment orchestrator - coordinates multi-step deployments."""
 
+import time
 from typing import Dict, Any, Optional
 from uuid import UUID, uuid4
 from datetime import datetime, timezone
@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from execution_engine.domain.service import DomainService
 from execution_engine.domain.models import (
     DeploymentStatus, StepStatus, DeploymentStepExecution,
-    DeployedResource, ResourceType
+    DeployedResource, ResourceType, ApplicationStatus
 )
 from execution_engine.core.service import ExecutionService
 from execution_engine.core.models import Execution, ExecutionState
@@ -48,7 +48,7 @@ class DeploymentOrchestrator:
         """
         Start a deployment workflow.
         
-        This creates executions for each deployment step.
+        This creates executions for each deployment step and waits for completion.
         """
         deployment = self._domain_service.get_deployment(deployment_id)
         if not deployment:
@@ -68,31 +68,48 @@ class DeploymentOrchestrator:
         
         print(f"[orchestrator] deployment has {len(template.deployment_steps)} steps")
         
-        # For MVP: Execute steps sequentially
-        # Future: Support parallel execution with dependency graph
-        
-        for step_def in sorted(template.deployment_steps, key=lambda s: s.order):
-            print(f"[orchestrator] processing step {step_def.order}: {step_def.step_id}")
+        try:
+            # Execute steps sequentially
+            for step_def in sorted(template.deployment_steps, key=lambda s: s.order):
+                print(f"[orchestrator] processing step {step_def.order}: {step_def.step_id}")
+                
+                try:
+                    self._execute_step(deployment, step_def)
+                except Exception as e:
+                    print(f"[orchestrator] step {step_def.step_id} failed: {e}")
+                    raise
             
-            try:
-                self._execute_step(deployment, step_def)
-            except Exception as e:
-                print(f"[orchestrator] step {step_def.step_id} failed: {e}")
-                
-                # Mark deployment as failed
-                deployment.status = DeploymentStatus.FAILED
-                deployment.error_message = str(e)
-                deployment.completed_at = datetime.now(timezone.utc)
-                self._deployment_repo.update(deployment)
-                
-                raise
-        
-        # All steps completed
-        deployment.status = DeploymentStatus.RUNNING
-        deployment.completed_at = datetime.now(timezone.utc)
-        self._deployment_repo.update(deployment)
-        
-        print(f"[orchestrator] deployment {deployment_id} completed successfully")
+            # All steps completed
+            deployment.status = DeploymentStatus.RUNNING
+            deployment.completed_at = datetime.now(timezone.utc)
+            self._deployment_repo.update(deployment)
+            
+            # ✅ Update application status to RUNNING
+            application = self._domain_service.get_application(deployment.application_id)
+            if application:
+                application.status = ApplicationStatus.RUNNING
+                self._domain_service._app_repo.update(application)
+                print(f"[orchestrator] updated application {application.application_id} to RUNNING")
+            
+            print(f"[orchestrator] deployment {deployment_id} completed successfully")
+            
+        except Exception as e:
+            print(f"[orchestrator] deployment {deployment_id} failed: {e}")
+            
+            # Mark deployment as failed
+            deployment.status = DeploymentStatus.FAILED
+            deployment.error_message = str(e)
+            deployment.completed_at = datetime.now(timezone.utc)
+            self._deployment_repo.update(deployment)
+            
+            # ✅ Update application status to FAILED
+            application = self._domain_service.get_application(deployment.application_id)
+            if application:
+                application.status = ApplicationStatus.FAILED
+                self._domain_service._app_repo.update(application)
+                print(f"[orchestrator] updated application {application.application_id} to FAILED")
+            
+            raise
     
     def _execute_step(self, deployment, step_def) -> Dict[str, Any]:
         """
@@ -168,7 +185,7 @@ class DeploymentOrchestrator:
         """
         Execute container deployment step.
         
-        This creates an Execution and processes it through the execution engine.
+        This creates an Execution and waits for it to complete.
         """
         spec = step_config["spec_template"]
         
@@ -195,7 +212,7 @@ class DeploymentOrchestrator:
         
         print(f"[orchestrator] selected node: {node.node_name}")
         
-        # Create execution with agent URL
+        # Create execution
         execution = Execution(
             execution_id=uuid4(),
             tenant_id=deployment.tenant_id,
@@ -205,7 +222,7 @@ class DeploymentOrchestrator:
             runtime_type="docker",
             spec={
                 "node_id": str(node.node_id),
-                "agent_url": node.runtime_agent_url,  # ADD THIS
+                "agent_url": node.runtime_agent_url,
                 "container_spec": spec,
             },
         )
@@ -215,18 +232,80 @@ class DeploymentOrchestrator:
         self._execution_service.queue_execution(execution.execution_id)
         
         print(f"[orchestrator] created execution {execution.execution_id}")
+        print(f"[orchestrator] waiting for execution to complete...")
         
-        result = {
-            "execution_id": str(execution.execution_id),
-            "node_id": str(node.node_id),
-            "node_name": node.node_name,
-            "container_name": spec["name"],
-            "status": "queued"
-        }
+        # ✅ NEW: Wait for execution to complete
+        result = self._wait_for_execution(
+            execution_id=execution.execution_id,
+            timeout_seconds=300,  # 5 minutes
+        )
         
-        print(f"[orchestrator] container deployment queued: {result}")
+        print(f"[orchestrator] container deployment completed: {result}")
         
         return result
+    
+    def _wait_for_execution(
+        self,
+        execution_id: UUID,
+        timeout_seconds: int = 300,
+    ) -> Dict[str, Any]:
+        """
+        Wait for execution to complete.
+        
+        Polls execution status every 2 seconds until:
+        - Execution completes (returns result)
+        - Execution fails (raises error)
+        - Timeout (raises error)
+        
+        Args:
+            execution_id: Execution to wait for
+            timeout_seconds: Maximum time to wait
+            
+        Returns:
+            Execution result dictionary
+            
+        Raises:
+            RuntimeError: If execution fails or times out
+        """
+        start_time = datetime.now(timezone.utc)
+        poll_interval = 2  # seconds
+        
+        while True:
+            # Get current execution state
+            execution = self._execution_service._repo.get(execution_id)
+            
+            if not execution:
+                raise RuntimeError(f"Execution {execution_id} not found")
+            
+            # Check if completed
+            if execution.state == ExecutionState.COMPLETED:
+                print(f"[orchestrator] execution {execution_id} completed successfully")
+                
+                result = {
+                    "execution_id": str(execution.execution_id),
+                    "status": "completed",
+                    "deployment_result": execution.deployment_result or {},
+                }
+                
+                return result
+            
+            # Check if failed
+            if execution.state == ExecutionState.FAILED:
+                error_msg = execution.error_message or "Unknown error"
+                print(f"[orchestrator] execution {execution_id} failed: {error_msg}")
+                raise RuntimeError(f"Execution failed: {error_msg}")
+            
+            # Check timeout
+            elapsed = (datetime.now(timezone.utc) - start_time).total_seconds()
+            if elapsed > timeout_seconds:
+                raise RuntimeError(f"Execution timeout after {timeout_seconds}s (current state: {execution.state.value})")
+            
+            # Log progress
+            if elapsed % 10 == 0:  # Log every 10 seconds
+                print(f"[orchestrator] execution {execution_id} still running (state: {execution.state.value}, elapsed: {int(elapsed)}s)")
+            
+            # Wait before next poll
+            time.sleep(poll_interval)
     
     def _parse_memory(self, memory_str: str) -> int:
         """Parse memory string (e.g., '512Mi', '1Gi') to MB."""

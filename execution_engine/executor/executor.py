@@ -1,4 +1,4 @@
-# execution_engine/executor/executor.py (UPDATE)
+# execution_engine/executor/executor.py
 """Executor - claims and executes container deployments."""
 
 import threading
@@ -71,7 +71,7 @@ class Executor:
                 self._renew_running_leases()
                 self._claim_and_execute()
             except Exception as e:
-                logger.error(f"[executor] Error in main loop: {e}")
+                logger.error(f"[executor] Error in main loop: {e}", exc_info=True)
             
             time.sleep(self.poll_interval)
 
@@ -87,6 +87,8 @@ class Executor:
             except ExecutionLeaseError:
                 logger.warning(f"[executor] Lost lease for {execution_id}")
                 self._handle_lost_execution(execution_id)
+            except Exception as e:
+                logger.error(f"[executor] Error renewing lease for {execution_id}: {e}")
 
     def _handle_lost_execution(self, execution_id: UUID):
         """Handle lost execution lease."""
@@ -128,8 +130,12 @@ class Executor:
                     execution.execution_id,
                     worker_id=self.executor_id,
                 )
-            except ExecutionLeaseError:
-                logger.error(f"[executor] Failed to start {execution.execution_id}")
+            except ExecutionLeaseError as e:
+                logger.error(f"[executor] Failed to start {execution.execution_id}: {e}")
+                slot.release()
+                return
+            except Exception as e:
+                logger.error(f"[executor] Error starting {execution.execution_id}: {e}")
                 slot.release()
                 return
 
@@ -196,9 +202,24 @@ class Executor:
                 spec=execution.spec
             )
             
-            # Update execution with result
-            execution.deployment_result = result
-            self.repo.update(execution)
+            logger.info(f"[executor] [{execution_id}] Deployment completed, updating result...")
+            
+            # ✅ FIX: Get fresh execution to avoid version conflict
+            fresh_execution = self.repo.get(execution_id)
+            if not fresh_execution:
+                raise RuntimeError("Execution disappeared during update")
+            
+            # Update with deployment result
+            fresh_execution.deployment_result = result
+            fresh_execution.version += 1
+            
+            # Save the updated result
+            try:
+                self.repo.update(fresh_execution)
+                logger.info(f"[executor] [{execution_id}] Result saved successfully")
+            except Exception as update_error:
+                logger.error(f"[executor] [{execution_id}] Failed to save result: {update_error}")
+                # Continue anyway - we'll complete the execution
             
             # Complete execution
             self.service.complete_execution(
@@ -209,7 +230,7 @@ class Executor:
             logger.info(f"[executor] [{execution_id}] ✅ Completed successfully")
             
         except Exception as e:
-            logger.error(f"[executor] [{execution_id}] ❌ Failed: {e}")
+            logger.error(f"[executor] [{execution_id}] ❌ Failed: {e}", exc_info=True)
             
             # Fail execution
             try:
