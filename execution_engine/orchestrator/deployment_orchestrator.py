@@ -48,7 +48,11 @@ class DeploymentOrchestrator:
         """
         Start a deployment workflow.
         
-        This creates executions for each deployment step and waits for completion.
+        ✅ ASYNC VERSION:
+        - Creates executions for all steps
+        - Queues them
+        - Returns immediately
+        - Status updater handles completion
         """
         deployment = self._domain_service.get_deployment(deployment_id)
         if not deployment:
@@ -61,7 +65,7 @@ class DeploymentOrchestrator:
         if not template:
             raise ValueError(f"Template {deployment.template_id} not found")
         
-        # Update deployment status
+        # ✅ Update deployment status to DEPLOYING
         deployment.status = DeploymentStatus.DEPLOYING
         deployment.started_at = datetime.now(timezone.utc)
         self._deployment_repo.update(deployment)
@@ -69,7 +73,7 @@ class DeploymentOrchestrator:
         print(f"[orchestrator] deployment has {len(template.deployment_steps)} steps")
         
         try:
-            # Execute steps sequentially
+            # Execute steps sequentially (create executions)
             for step_def in sorted(template.deployment_steps, key=lambda s: s.order):
                 print(f"[orchestrator] processing step {step_def.order}: {step_def.step_id}")
                 
@@ -79,38 +83,23 @@ class DeploymentOrchestrator:
                     print(f"[orchestrator] step {step_def.step_id} failed: {e}")
                     raise
             
-            # All steps completed
-            deployment.status = DeploymentStatus.RUNNING
-            deployment.completed_at = datetime.now(timezone.utc)
-            self._deployment_repo.update(deployment)
+            # ✅ REMOVE ALL STATUS UPDATES HERE
+            # Status updater will handle them!
             
-            # ✅ Update application status to RUNNING
-            application = self._domain_service.get_application(deployment.application_id)
-            if application:
-                application.status = ApplicationStatus.RUNNING
-                self._domain_service._app_repo.update(application)
-                print(f"[orchestrator] updated application {application.application_id} to RUNNING")
-            
-            print(f"[orchestrator] deployment {deployment_id} completed successfully")
+            print(f"[orchestrator] all executions queued, status updater will monitor")
             
         except Exception as e:
-            print(f"[orchestrator] deployment {deployment_id} failed: {e}")
+            print(f"[orchestrator] deployment {deployment_id} failed during orchestration: {e}")
             
-            # Mark deployment as failed
+            # ✅ Only mark as FAILED if orchestration itself fails
+            # (not execution failures - status updater handles those)
             deployment.status = DeploymentStatus.FAILED
-            deployment.error_message = str(e)
+            deployment.error_message = f"Orchestration error: {str(e)}"
             deployment.completed_at = datetime.now(timezone.utc)
             self._deployment_repo.update(deployment)
             
-            # ✅ Update application status to FAILED
-            application = self._domain_service.get_application(deployment.application_id)
-            if application:
-                application.status = ApplicationStatus.FAILED
-                self._domain_service._app_repo.update(application)
-                print(f"[orchestrator] updated application {application.application_id} to FAILED")
-            
             raise
-    
+  
     def _execute_step(self, deployment, step_def) -> Dict[str, Any]:
         """
         Execute a single deployment step.
@@ -185,7 +174,8 @@ class DeploymentOrchestrator:
         """
         Execute container deployment step.
         
-        This creates an Execution and waits for it to complete.
+        ✅ CHANGE: Create execution and queue it, then return immediately.
+        Status updater will handle completion checking.
         """
         spec = step_config["spec_template"]
         
@@ -195,8 +185,6 @@ class DeploymentOrchestrator:
         resources = spec.get("resources", {})
         cpu = float(resources.get("cpu", "0.5"))
         memory_str = resources.get("memory", "512Mi")
-        
-        # Convert memory to MB
         memory_mb = self._parse_memory(memory_str)
         
         # Select node
@@ -204,7 +192,7 @@ class DeploymentOrchestrator:
             runtime_type="docker",
             required_cpu=cpu,
             required_memory=memory_mb,
-            required_storage=1,  # 1GB default
+            required_storage=1,
         )
         
         if not node:
@@ -232,18 +220,21 @@ class DeploymentOrchestrator:
         self._execution_service.queue_execution(execution.execution_id)
         
         print(f"[orchestrator] created execution {execution.execution_id}")
-        print(f"[orchestrator] waiting for execution to complete...")
         
-        # ✅ NEW: Wait for execution to complete
-        result = self._wait_for_execution(
-            execution_id=execution.execution_id,
-            timeout_seconds=300,  # 5 minutes
-        )
+        # ✅ CHANGE: Return immediately (don't wait!)
+        # Status updater will monitor and update deployment status
         
-        print(f"[orchestrator] container deployment completed: {result}")
+        result = {
+            "execution_id": str(execution.execution_id),
+            "node_id": str(node.node_id),
+            "node_name": node.node_name,
+            "container_name": spec["name"],
+            "status": "queued",  # Status updater will change to "completed"
+        }
         
-        return result
-    
+        print(f"[orchestrator] container deployment queued: {result}")
+        
+        return result    
     def _wait_for_execution(
         self,
         execution_id: UUID,
