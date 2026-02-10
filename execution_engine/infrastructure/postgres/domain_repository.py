@@ -420,3 +420,98 @@ class DeploymentRepository:
             raise ExecutionConcurrencyError(f"Failed to update deployment: {e}") from e
         finally:
             session.close()
+
+# ============================================
+# DEPLOYED RESOURCES REPOSITORY
+# ============================================
+
+class DeployedResourceRepository:
+    """Repository for deployed resources."""
+    
+    def __init__(self, session_factory: Optional[sessionmaker] = None):
+        self._session_factory = session_factory or SessionLocal
+    
+    def _get_session(self):
+        return self._session_factory()
+    
+    def create(self, resource: DeployedResource) -> None:
+        """Create a new deployed resource."""
+        session = self._get_session()
+        try:
+            from execution_engine.infrastructure.postgres.models import DeployedResourceORM
+            
+            orm = DeployedResourceORM(
+                resource_id=resource.resource_id,
+                deployment_id=resource.deployment_id,
+                resource_type=resource.resource_type,
+                external_id=resource.external_id,
+                node_id=resource.node_id,
+                name=resource.name,
+                spec=resource.spec,
+                status=resource.status,
+                health_status=resource.health_status,
+                consecutive_health_failures=resource.consecutive_health_failures,
+                last_health_check_at=resource.last_health_check_at,
+                created_at=resource.created_at,
+            )
+            
+            session.add(orm)
+            session.commit()
+            print(f"[resource_repo] created resource {resource.resource_id}")
+        except SQLAlchemyError as e:
+            session.rollback()
+            raise ExecutionConcurrencyError(f"Failed to create resource: {e}") from e
+        finally:
+            session.close()
+    
+    def get(self, resource_id: UUID) -> Optional[DeployedResource]:
+        """Get resource by ID."""
+        session = self._get_session()
+        try:
+            from execution_engine.infrastructure.postgres.models import DeployedResourceORM
+            
+            orm = session.get(DeployedResourceORM, resource_id)
+            if not orm:
+                return None
+            
+            return DeployedResource(
+                resource_id=orm.resource_id,
+                deployment_id=orm.deployment_id,
+                resource_type=orm.resource_type,
+                external_id=orm.external_id,
+                node_id=orm.node_id,
+                name=orm.name,
+                spec=orm.spec,
+                status=orm.status,
+                health_status=orm.health_status,
+                consecutive_health_failures=orm.consecutive_health_failures,
+                last_health_check_at=orm.last_health_check_at,
+                created_at=orm.created_at,
+            )
+        finally:
+            session.close()
+    
+    def update(self, resource: DeployedResource) -> None:
+        """Update resource."""
+        session = self._get_session()
+        try:
+            from execution_engine.infrastructure.postgres.models import DeployedResourceORM
+            
+            orm = session.get(DeployedResourceORM, resource.resource_id)
+            if not orm:
+                raise ExecutionConcurrencyError(f"Resource {resource.resource_id} not found")
+            
+            orm.external_id = resource.external_id
+            orm.status = resource.status
+            orm.health_status = resource.health_status
+            orm.consecutive_health_failures = resource.consecutive_health_failures
+            orm.last_health_check_at = resource.last_health_check_at
+            orm.spec = resource.spec
+            
+            session.commit()
+            print(f"[resource_repo] updated resource {resource.resource_id}")
+        except SQLAlchemyError as e:
+            session.rollback()
+            raise ExecutionConcurrencyError(f"Failed to update resource: {e}") from e
+        finally:
+            session.close()

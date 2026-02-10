@@ -241,7 +241,11 @@ class DeployedResource:
     spec: Dict[str, Any] = field(default_factory=dict)
     
     status: str = "unknown"
-    
+    health_status: HealthStatus = HealthStatus.UNKNOWN  # ✅ ADD THIS
+    # ✅ ADD health tracking fields
+    consecutive_health_failures: int = 0
+    last_health_check_at: Optional[datetime] = None
+
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
 

@@ -268,6 +268,42 @@ async def remove_container(container_id: str, force: bool = False):
         logger.error(f"Failed to remove container: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+# runtime_agent/server.py (ADD restart endpoint)
+
+@app.post("/containers/{container_id}/restart")
+async def restart_container(container_id: str):
+    """
+    Restart a container.
+
+    Args:
+        container_id: Container ID
+
+    Returns:
+        Restart result
+    """
+    logger.info(f"Restarting container: {container_id}")
+
+    try:
+        container = docker_client.containers.get(container_id)
+
+        # Restart container
+        container.restart(timeout=10)
+
+        logger.info(f"✅ Container restarted: {container_id}")
+
+        return {
+            "container_id": container_id,
+            "status": "restarted"
+        }
+
+    except docker.errors.NotFound:
+        logger.error(f"Container not found: {container_id}")
+        raise HTTPException(status_code=404, detail="Container not found")
+
+    except Exception as e:
+        logger.error(f"Error restarting container: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 if __name__ == "__main__":
     import uvicorn

@@ -11,7 +11,8 @@ from alembic import context
 # Import your models and config
 from execution_engine.infrastructure.postgres.config import settings
 from execution_engine.infrastructure.postgres.database import Base
-from execution_engine.infrastructure.postgres.models import ExecutionORM, ApplicationTemplateORM, ApplicationORM, DeploymentORM, DeploymentStepExecutionORM, DeployedResourceORM, DomainORM, ProvisionedDatabaseORM,InfrastructureNodeORM  # Import all models
+from execution_engine.infrastructure.postgres.models import ExecutionORM, ApplicationTemplateORM, ApplicationORM, DeploymentORM, DeploymentStepExecutionORM, DeployedResourceORM, DomainORM, ProvisionedDatabaseORM,InfrastructureNodeORM, DeployedResourceORM  # Import all models
+
 
 # this is the Alembic Config object
 config = context.config

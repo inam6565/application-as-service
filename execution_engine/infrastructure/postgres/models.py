@@ -293,6 +293,11 @@ class DeployedResourceORM(Base):
     
     status = Column(String(50), nullable=False, default="unknown")
     
+    # ✅ ADD health tracking
+    health_status = Column(SQLEnum(HealthStatus), nullable=False, default=HealthStatus.UNKNOWN)
+    consecutive_health_failures = Column(Integer, nullable=False, default=0)
+    last_health_check_at = Column(DateTime, nullable=True)
+    
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
     
     # Relationships
@@ -301,6 +306,7 @@ class DeployedResourceORM(Base):
     __table_args__ = (
         Index('ix_resources_deployment', 'deployment_id'),
         Index('ix_resources_type', 'resource_type'),
+        Index('ix_resources_health', 'health_status'),  # ✅ ADD index
     )
 
 
@@ -435,3 +441,4 @@ class InfrastructureNodeORM(Base):
         Index('ix_nodes_status', 'status'),
         Index('ix_nodes_heartbeat', 'last_heartbeat_at'),
     )
+

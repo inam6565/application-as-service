@@ -174,8 +174,7 @@ class DeploymentOrchestrator:
         """
         Execute container deployment step.
         
-        ✅ CHANGE: Create execution and queue it, then return immediately.
-        Status updater will handle completion checking.
+        Creates execution and tracks deployed resource.
         """
         spec = step_config["spec_template"]
         
@@ -221,20 +220,59 @@ class DeploymentOrchestrator:
         
         print(f"[orchestrator] created execution {execution.execution_id}")
         
-        # ✅ CHANGE: Return immediately (don't wait!)
-        # Status updater will monitor and update deployment status
+        # ✅ ADD: Track as deployed resource
+        from execution_engine.domain.models import DeployedResource, ResourceType, HealthStatus
+        from execution_engine.infrastructure.postgres.domain_repository import DeployedResourceRepository
         
+        # Convert health check to dict
+        health_check_dict = None
+        if step_def.health_check:
+            health_check_dict = {
+                'type': step_def.health_check.type,
+                'path': step_def.health_check.path,
+                'port': step_def.health_check.port,
+                'command': step_def.health_check.command,
+                'interval_seconds': step_def.health_check.interval_seconds,
+                'timeout_seconds': step_def.health_check.timeout_seconds,
+                'retries': step_def.health_check.retries,
+                'initial_delay_seconds': step_def.health_check.initial_delay_seconds,
+            }
+        
+        deployed_resource = DeployedResource(
+            resource_id=uuid4(),
+            deployment_id=deployment.deployment_id,
+            resource_type=ResourceType.CONTAINER,
+            external_id="pending",  # Will be updated when execution completes
+            node_id=node.node_id,
+            name=spec["name"],
+            spec={
+                **step_config,
+                'execution_id': str(execution.execution_id),
+                'health_check': health_check_dict,
+            },
+            status="pending",
+            health_status=HealthStatus.UNKNOWN,
+        )
+        
+        resource_repo = DeployedResourceRepository()
+        resource_repo.create(deployed_resource)
+        
+        print(f"[orchestrator] tracked deployed resource {deployed_resource.resource_id}")
+        
+        # Return result
         result = {
-            "execution_id": str(execution.execution_id),
-            "node_id": str(node.node_id),
-            "node_name": node.node_name,
-            "container_name": spec["name"],
-            "status": "queued",  # Status updater will change to "completed"
+            'execution_id': str(execution.execution_id),
+            'resource_id': str(deployed_resource.resource_id),
+            'node_id': str(node.node_id),
+            'node_name': node.node_name,
+            'container_name': spec["name"],
+            'status': "queued",
         }
         
         print(f"[orchestrator] container deployment queued: {result}")
         
-        return result    
+        return result
+   
     def _wait_for_execution(
         self,
         execution_id: UUID,
