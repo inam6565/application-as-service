@@ -160,3 +160,77 @@ class Execution:
     def can_retry(self) -> bool:
         """Check if execution can be retried."""
         return self.state == ExecutionState.FAILED and self.retry_count < self.max_retries
+    
+    def is_transient_error(self) -> bool:
+        """
+        Determine if error is transient (retryable).
+        
+        Transient errors:
+        - Network errors (connection, timeout)
+        - Node unavailable
+        - Resource temporarily unavailable
+        
+        Permanent errors:
+        - Validation errors
+        - Business logic errors
+        - Invalid configuration
+        """
+        if not self.error_message:
+            return False
+        
+        error_lower = self.error_message.lower()
+        
+        # Transient error patterns
+        transient_patterns = [
+            'connection',
+            'timeout',
+            'unavailable',
+            'temporary',
+            'network',
+            'refused',
+            'unreachable',
+            'no route',
+            'connection reset',
+            'broken pipe',
+            'node not found',
+            'node offline',
+        ]
+        
+        # Permanent error patterns
+        permanent_patterns = [
+            'validation',
+            'invalid',
+            'not found',  # Resource not found (not node)
+            'unauthorized',
+            'forbidden',
+            'bad request',
+            'malformed',
+            'missing required',
+        ]
+        
+        # Check permanent first (takes precedence)
+        for pattern in permanent_patterns:
+            if pattern in error_lower:
+                return False
+        
+        # Check transient
+        for pattern in transient_patterns:
+            if pattern in error_lower:
+                return True
+        
+        # Default: don't retry unknown errors
+        return False
+
+    def calculate_retry_delay(self) -> int:
+        """
+        Calculate retry delay in seconds using exponential backoff.
+        
+        Returns:
+            Delay in seconds: 10s, 30s, 90s
+        """
+        delays = [10, 30, 90]
+        
+        if self.retry_count >= len(delays):
+            return delays[-1]
+        
+        return delays[self.retry_count]
