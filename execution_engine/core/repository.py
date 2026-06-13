@@ -49,6 +49,17 @@ class ExecutionRepository(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def list_by_deployment(
+        self,
+        deployment_id: UUID,
+        limit: int = 100,
+    ) -> Iterable[Execution]:
+        """
+        List executions for a deployment.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
     def try_claim(
         self,
         execution_id: UUID,

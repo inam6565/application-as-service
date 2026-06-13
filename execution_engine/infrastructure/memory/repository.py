@@ -38,6 +38,19 @@ class InMemoryExecutionRepository(ExecutionRepository):
             if len(results) >= limit:
                 break
         return results
+
+    def list_by_deployment(
+        self,
+        deployment_id: UUID,
+        limit: int = 100,
+    ) -> Iterable[Execution]:
+        results = []
+        for e in self._store.values():
+            if e.deployment_id == deployment_id:
+                results.append(e)
+            if len(results) >= limit:
+                break
+        return results
     def try_claim(
         self,
         execution_id: UUID,
@@ -57,6 +70,7 @@ class InMemoryExecutionRepository(ExecutionRepository):
             if execution.lease_expires_at and execution.lease_expires_at > now:
                 return False
 
+            execution.state = ExecutionState.CLAIMED
             execution.lease_owner = worker_id
             execution.lease_expires_at = now + timedelta(seconds=lease_seconds)
             execution.version += 1
@@ -101,8 +115,8 @@ class InMemoryExecutionRepository(ExecutionRepository):
 
             now = datetime.utcnow()
 
-            if execution.state != ExecutionState.QUEUED:
-                raise ExecutionInvalidStateError("Not QUEUED")
+            if execution.state != ExecutionState.CLAIMED:
+                raise ExecutionInvalidStateError("Not CLAIMED")
 
             if execution.lease_owner != worker_id:
                 raise ExecutionLeaseError("Wrong lease owner")
@@ -118,6 +132,7 @@ class InMemoryExecutionRepository(ExecutionRepository):
         execution_id: UUID,
         worker_id: str,
         final_state: ExecutionState,
+        error_message: str | None = None,
     ) -> None:
         assert final_state in {
             ExecutionState.COMPLETED,
@@ -147,6 +162,8 @@ class InMemoryExecutionRepository(ExecutionRepository):
 
             execution.state = final_state
             execution.finished_at = now
+            if error_message:
+                execution.error_message = error_message
             execution.lease_owner = None
             execution.lease_expires_at = None
             execution.version += 1

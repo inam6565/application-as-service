@@ -2,6 +2,7 @@
 
 """Node manager repository."""
 
+import logging
 from typing import List, Optional
 from uuid import UUID
 from datetime import datetime, timezone
@@ -13,6 +14,8 @@ from execution_engine.node_manager.models import InfrastructureNode, NodeStatus,
 from execution_engine.infrastructure.postgres.database import SessionLocal
 from execution_engine.infrastructure.postgres.models import InfrastructureNodeORM
 from execution_engine.core.errors import ExecutionConcurrencyError
+
+logger = logging.getLogger(__name__)
 
 
 def node_to_orm(node: InfrastructureNode) -> InfrastructureNodeORM:
@@ -85,7 +88,7 @@ class NodeRepository:
             orm = node_to_orm(node)
             session.add(orm)
             session.commit()
-            print(f"[node_repo] registered node {node.node_id} ({node.node_name})")
+            logger.info("[node_repo] registered node %s (%s)", node.node_id, node.node_name)
         except IntegrityError as e:
             session.rollback()
             raise ExecutionConcurrencyError(f"Node {node.node_name} already exists") from e
@@ -134,7 +137,7 @@ class NodeRepository:
             orm.last_heartbeat_at = node.last_heartbeat_at
             
             session.commit()
-            print(f"[node_repo] updated node {node.node_id}")
+            logger.info("[node_repo] updated node %s", node.node_id)
         except SQLAlchemyError as e:
             session.rollback()
             raise ExecutionConcurrencyError(f"Failed to update node: {e}") from e
@@ -173,7 +176,7 @@ class NodeRepository:
                     if runtime_type in node.supported_runtimes
                 ]
             
-            print(f"[node_repo] found {len(nodes)} available nodes for runtime '{runtime_type}'")
+            logger.info("[node_repo] found %s available nodes for runtime '%s'", len(nodes), runtime_type)
             
             return nodes
         finally:

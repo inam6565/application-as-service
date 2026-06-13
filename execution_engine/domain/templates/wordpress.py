@@ -11,7 +11,7 @@ from execution_engine.domain.models import (
 WORDPRESS_TEMPLATE = ApplicationTemplate(
     template_id="wordpress",
     name="WordPress",
-    description="The world's most popular CMS platform for blogs and websites",
+    description="The world's most popular CMS platform for blogs and websites with an auto-provisioned MySQL database",
     version="6.4",
     category="cms",
     icon_url="https://s.w.org/style/images/about/WordPress-logotype-wmark.png",
@@ -44,9 +44,10 @@ WORDPRESS_TEMPLATE = ApplicationTemplate(
             depends_on=[],
             spec_template={
                 "db_type": "mysql",
-                "db_name": "wp_{{application_id_short}}",
-                "db_user": "wp_user_{{application_id_short}}",
-                "storage_size": "{{db_storage_size}}"
+                "db_name": "{{db_name}}",
+                "db_user": "{{db_user}}",
+                "db_password": "{{db_password}}",
+                "storage_size": 10,
             },
             health_check=HealthCheckDefinition(
                 type="tcp",
@@ -66,12 +67,12 @@ WORDPRESS_TEMPLATE = ApplicationTemplate(
             depends_on=["create-volume", "provision-database"],
             spec_template={
                 "image": "wordpress:{{wordpress_version}}",
-                "name": "wordpress-{{application_id_short}}",
+                "name": "wordpress-{{application_id_short}}-{{deployment_id_short}}",
                 "ports": {"80/tcp": "{{exposed_port}}"},
                 "env": {
-                    "WORDPRESS_DB_HOST": "{{db_host}}:3306",
-                    "WORDPRESS_DB_NAME": "wp_{{application_id_short}}",
-                    "WORDPRESS_DB_USER": "wp_user_{{application_id_short}}",
+                    "WORDPRESS_DB_HOST": "{{db_host}}:{{db_port}}",
+                    "WORDPRESS_DB_NAME": "{{db_name}}",
+                    "WORDPRESS_DB_USER": "{{db_user}}",
                     "WORDPRESS_DB_PASSWORD": "{{db_password}}"
                 },
                 "volumes": ["wp-data-{{application_id_short}}:/var/www/html"],
@@ -103,31 +104,6 @@ WORDPRESS_TEMPLATE = ApplicationTemplate(
             required=True,
             validation_regex=r"^[a-z0-9\-\.]+\.[a-z]{2,}$",
             placeholder="myblog.com",
-        ),
-        TemplateInputField(
-            field_name="db_host",
-            field_type="string",
-            label="Database Host",
-            description="MySQL database host address",
-            required=True,
-            default_value="mysql-server.local",
-            placeholder="mysql-server.local",
-        ),
-        TemplateInputField(
-            field_name="db_password",
-            field_type="password",
-            label="Database Password",
-            description="MySQL database password (auto-generated if not provided)",
-            required=True,
-        ),
-        TemplateInputField(
-            field_name="db_storage_size",
-            field_type="select",
-            label="Database Storage",
-            description="Storage size for MySQL database",
-            required=False,
-            default_value="10",
-            options=["5", "10", "20", "50"],
         ),
         TemplateInputField(
             field_name="wordpress_version",

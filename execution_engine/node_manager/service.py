@@ -2,6 +2,7 @@
 
 """Node manager service."""
 
+import logging
 from typing import List, Optional
 from uuid import UUID
 from datetime import datetime, timezone, timedelta
@@ -11,6 +12,8 @@ from execution_engine.node_manager.models import (
 )
 from execution_engine.infrastructure.postgres.node_repository import NodeRepository
 from execution_engine.core.errors import ExecutionValidationError
+
+logger = logging.getLogger(__name__)
 
 
 class NodeManagerService:
@@ -39,7 +42,7 @@ class NodeManagerService:
         
         self._node_repo.create(node)
         
-        print(f"[node_manager] registered node {node.node_id} ({node.node_name})")
+        logger.info("[node_manager] registered node %s (%s)", node.node_id, node.node_name)
     
     def get_node(self, node_id: UUID) -> Optional[InfrastructureNode]:
         """Get node by ID."""
@@ -74,13 +77,13 @@ class NodeManagerService:
         ]
         #print(f"[node_manager] suitable nodes {suitable_nodes}")
         if not suitable_nodes:
-            print(f"[node_manager] no suitable nodes found for {runtime_type}")
+            logger.info("[node_manager] no suitable nodes found for %s", runtime_type)
             return None
         
         # Select least loaded
         selected = min(suitable_nodes, key=lambda n: n.active_containers)
         
-        print(f"[node_manager] selected node {selected.node_id} ({selected.node_name})")
+        logger.info("[node_manager] selected node %s (%s)", selected.node_id, selected.node_name)
         
         return selected
     

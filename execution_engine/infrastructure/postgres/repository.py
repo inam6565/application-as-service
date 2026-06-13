@@ -3,10 +3,11 @@
 """PostgreSQL repository implementation using SQLAlchemy."""
 
 from datetime import datetime, timedelta
-from typing import Iterable, Optional, Callable
+import logging
+from typing import Iterable, Optional
 from uuid import UUID
 
-from sqlalchemy import and_, or_
+from sqlalchemy import and_
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -15,11 +16,12 @@ from execution_engine.core.models import Execution, ExecutionState
 from execution_engine.core.errors import (
     ExecutionConcurrencyError,
     ExecutionLeaseError,
-    ExecutionNotFound,
     ExecutionAlreadyExists,
 )
 from execution_engine.infrastructure.postgres.database import SessionLocal
 from execution_engine.infrastructure.postgres.models import ExecutionORM
+
+logger = logging.getLogger(__name__)
 
 
 # ============================================
@@ -115,7 +117,7 @@ class PostgresExecutionRepository(ExecutionRepository):
             orm = domain_to_orm(execution)
             session.add(orm)
             session.commit()
-            print(f"[postgres] create {execution.execution_id} -> done")
+            logger.info("[postgres] create %s -> done", execution.execution_id)
         except IntegrityError as e:
             session.rollback()
             raise ExecutionAlreadyExists(
@@ -138,10 +140,10 @@ class PostgresExecutionRepository(ExecutionRepository):
             orm = session.get(ExecutionORM, execution_id)
             
             if orm is None:
-                print(f"[postgres] get {execution_id} -> not found")
+                logger.info("[postgres] get %s -> not found", execution_id)
                 return None
             
-            print(f"[postgres] get {execution_id} -> found")
+            logger.info("[postgres] get %s -> found", execution_id)
             return orm_to_domain(orm)
         finally:
             session.close()
@@ -172,8 +174,27 @@ class PostgresExecutionRepository(ExecutionRepository):
             ).limit(limit)
             
             results = query.all()
-            print(f"[postgres] list_by_state state={state.value} -> {len(results)} rows")
+            logger.info("[postgres] list_by_state state=%s -> %s rows", state.value, len(results))
             
+            return [orm_to_domain(orm) for orm in results]
+        finally:
+            session.close()
+
+    def list_by_deployment(
+        self,
+        deployment_id: UUID,
+        limit: int = 100,
+    ) -> Iterable[Execution]:
+        """List executions for a deployment."""
+        session = self._get_session()
+        try:
+            results = (
+                session.query(ExecutionORM)
+                .filter(ExecutionORM.deployment_id == deployment_id)
+                .order_by(ExecutionORM.created_at.asc())
+                .limit(limit)
+                .all()
+            )
             return [orm_to_domain(orm) for orm in results]
         finally:
             session.close()
@@ -217,12 +238,12 @@ class PostgresExecutionRepository(ExecutionRepository):
             execution_orm.version += 1
             
             session.commit()
-            print(f"[postgres] try_claim {execution_id} by {worker_id} -> True")
+            logger.info("[postgres] try_claim %s by %s -> True", execution_id, worker_id)
             return True
             
         except Exception as e:
             session.rollback()
-            print(f"[postgres] try_claim {execution_id} by {worker_id} -> False (error: {e})")
+            logger.warning("[postgres] try_claim %s by %s -> False (%s)", execution_id, worker_id, e)
             return False
         finally:
             session.close()
@@ -263,7 +284,7 @@ class PostgresExecutionRepository(ExecutionRepository):
             execution_orm.version += 1
             
             session.commit()
-            print(f"[postgres] start succeeded for {execution_id}")
+            logger.info("[postgres] start succeeded for %s", execution_id)
             
         except ExecutionLeaseError:
             session.rollback()
@@ -308,7 +329,7 @@ class PostgresExecutionRepository(ExecutionRepository):
             current.version = execution.version
             
             session.commit()
-            print(f"[postgres] update {execution.execution_id} -> done")
+            logger.info("[postgres] update %s -> done", execution.execution_id)
             
         except ExecutionConcurrencyError:
             session.rollback()
@@ -352,7 +373,7 @@ class PostgresExecutionRepository(ExecutionRepository):
             execution_orm.version += 1
             
             session.commit()
-            print(f"[postgres] renew_lease {execution_id} -> {new_expires_at}")
+            logger.info("[postgres] renew_lease %s -> %s", execution_id, new_expires_at)
             
         except ExecutionLeaseError:
             session.rollback()
@@ -380,7 +401,7 @@ class PostgresExecutionRepository(ExecutionRepository):
                 )
             ).limit(limit).all()
             
-            print(f"[postgres] list_recoverable -> {len(results)} rows")
+            logger.info("[postgres] list_recoverable -> %s rows", len(results))
             return [orm_to_domain(orm) for orm in results]
         finally:
             session.close()
@@ -393,7 +414,8 @@ class PostgresExecutionRepository(ExecutionRepository):
         self,
         execution_id: UUID,
         worker_id: str,
-        final_state: ExecutionState
+        final_state: ExecutionState,
+        error_message: Optional[str] = None,
     ) -> None:
         """Finalize execution."""
         if final_state not in (ExecutionState.COMPLETED, ExecutionState.FAILED):
@@ -418,12 +440,14 @@ class PostgresExecutionRepository(ExecutionRepository):
             
             execution_orm.state = final_state
             execution_orm.finished_at = now
+            if error_message:
+                execution_orm.error_message = error_message
             execution_orm.lease_owner = None
             execution_orm.lease_expires_at = None
             execution_orm.version += 1
             
             session.commit()
-            print(f"[postgres] finalize {execution_id} -> {final_state.value}")
+            logger.info("[postgres] finalize %s -> %s", execution_id, final_state.value)
             
         except ExecutionLeaseError:
             session.rollback()

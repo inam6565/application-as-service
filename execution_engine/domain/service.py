@@ -2,6 +2,7 @@
 
 """Domain service - manages applications and deployments."""
 
+import logging
 from typing import Dict, Any, List, Optional
 from uuid import UUID, uuid4
 from datetime import datetime, timezone
@@ -9,12 +10,16 @@ import re
 
 from execution_engine.domain.models import (
     Application, ApplicationTemplate, Deployment, DeploymentStepExecution,
-    ApplicationStatus, DeploymentStatus, StepStatus, ResourceLimits
+    ApplicationStatus, DeploymentStatus, StepStatus, ResourceLimits, DeployedResource
 )
 from execution_engine.infrastructure.postgres.domain_repository import (
-    ApplicationRepository, ApplicationTemplateRepository, DeploymentRepository
+    ApplicationRepository, ApplicationTemplateRepository, DeploymentRepository,
+    DeployedResourceRepository, DeploymentStepExecutionRepository
 )
+from execution_engine.infrastructure.postgres.config import settings as database_settings
 from execution_engine.core.errors import ExecutionValidationError
+
+logger = logging.getLogger(__name__)
 
 
 class DomainService:
@@ -25,10 +30,14 @@ class DomainService:
         template_repo: ApplicationTemplateRepository,
         app_repo: ApplicationRepository,
         deployment_repo: DeploymentRepository,
+        resource_repo: DeployedResourceRepository = None,
+        step_repo: DeploymentStepExecutionRepository = None,
     ):
         self._template_repo = template_repo
         self._app_repo = app_repo
         self._deployment_repo = deployment_repo
+        self._resource_repo = resource_repo or DeployedResourceRepository()
+        self._step_repo = step_repo or DeploymentStepExecutionRepository()
     
     # ============================================
     # TEMPLATES
@@ -36,6 +45,10 @@ class DomainService:
     
     def register_template(self, template: ApplicationTemplate) -> None:
         """Register a new application template."""
+        existing = self._template_repo.get(template.template_id)
+        if existing:
+            self._template_repo.update(template)
+            return
         self._template_repo.create(template)
     
     def get_template(self, template_id: str) -> Optional[ApplicationTemplate]:
@@ -69,7 +82,8 @@ class DomainService:
             raise ExecutionValidationError(f"Template {template_id} not found")
         
         # Validate inputs
-        self._validate_inputs(template, user_inputs)
+        resolved_inputs = self._apply_default_inputs(template, user_inputs)
+        self._validate_inputs(template, resolved_inputs)
         
         # Create application
         application = Application(
@@ -79,14 +93,18 @@ class DomainService:
             template_version=template.version,
             name=name,
             description=description,
-            user_inputs=user_inputs,
+            user_inputs=resolved_inputs,
             status=ApplicationStatus.CREATING,
             resource_limits=template.default_resources,
         )
         
         self._app_repo.create(application)
         
-        print(f"[domain_service] created application {application.application_id} from template {template_id}")
+        logger.info(
+            "[domain_service] created application %s from template %s",
+            application.application_id,
+            template_id,
+        )
         
         return application
     
@@ -94,9 +112,14 @@ class DomainService:
         """Get application by ID."""
         return self._app_repo.get(application_id)
     
-    def list_applications(self, tenant_id: UUID) -> List[Application]:
+    def list_applications(
+        self,
+        tenant_id: UUID,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> List[Application]:
         """List tenant's applications."""
-        return self._app_repo.list_by_tenant(tenant_id)
+        return self._app_repo.list_by_tenant(tenant_id, limit=limit, offset=offset)
     
     def update_application_status(
         self,
@@ -114,6 +137,15 @@ class DomainService:
             application.public_url = public_url
         
         self._app_repo.update(application)
+
+    def set_application_status(
+        self,
+        application_id: UUID,
+        status: ApplicationStatus,
+        public_url: Optional[str] = None,
+    ) -> None:
+        """Set application status through the public service boundary."""
+        self.update_application_status(application_id, status, public_url=public_url)
     
     def delete_application(self, application_id: UUID) -> None:
         """Soft delete application."""
@@ -146,12 +178,19 @@ class DomainService:
         if not template:
             raise ExecutionValidationError(f"Template {application.template_id} not found")
         
+        deployment_id = uuid4()
+
         # Resolve configuration
-        resolved_config = self._resolve_config(template, application.user_inputs, application.application_id)
+        resolved_config = self._resolve_config(
+            template,
+            application.user_inputs,
+            application.application_id,
+            deployment_id,
+        )
         
         # Create deployment
         deployment = Deployment(
-            deployment_id=uuid4(),
+            deployment_id=deployment_id,
             application_id=application.application_id,
             tenant_id=application.tenant_id,
             template_id=template.template_id,
@@ -168,13 +207,54 @@ class DomainService:
         application.status = ApplicationStatus.CREATING
         self._app_repo.update(application)
         
-        print(f"[domain_service] created deployment {deployment.deployment_id} for app {application_id}")
+        logger.info(
+            "[domain_service] created deployment %s for app %s",
+            deployment.deployment_id,
+            application_id,
+        )
         
         return deployment
     
     def get_deployment(self, deployment_id: UUID) -> Optional[Deployment]:
         """Get deployment by ID."""
         return self._deployment_repo.get(deployment_id)
+
+    def list_application_deployments(
+        self,
+        application_id: UUID,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> List[Deployment]:
+        """List deployments for an application."""
+        return self._deployment_repo.list_by_application(
+            application_id=application_id,
+            limit=limit,
+            offset=offset,
+        )
+
+    def list_deployments_by_status(
+        self,
+        status: DeploymentStatus,
+        limit: int = 100,
+    ) -> List[Deployment]:
+        """List deployments by status."""
+        return self._deployment_repo.list_by_status(status=status, limit=limit)
+
+    def list_deployment_resources(self, deployment_id: UUID) -> List[DeployedResource]:
+        """List deployed resources for a deployment."""
+        return self._resource_repo.list_by_deployment(deployment_id)
+
+    def get_deployment_resource(self, resource_id: UUID) -> Optional[DeployedResource]:
+        """Get a deployed resource by ID."""
+        return self._resource_repo.get(resource_id)
+
+    def update_deployment_resource(self, resource: DeployedResource) -> None:
+        """Update a deployed resource."""
+        self._resource_repo.update(resource)
+
+    def list_deployment_steps(self, deployment_id: UUID) -> List[DeploymentStepExecution]:
+        """List deployment step executions."""
+        return self._step_repo.list_by_deployment(deployment_id)
     
     def update_deployment_status(
         self,
@@ -195,10 +275,39 @@ class DomainService:
             deployment.completed_at = datetime.now(timezone.utc)
         
         self._deployment_repo.update(deployment)
+
+    def update_deployment_metadata(
+        self,
+        deployment_id: UUID,
+        metadata_updates: Dict[str, Any],
+    ) -> None:
+        """Merge metadata into a deployment record."""
+        deployment = self._deployment_repo.get(deployment_id)
+        if not deployment:
+            raise ExecutionValidationError(f"Deployment {deployment_id} not found")
+
+        deployment.metadata = {
+            **(deployment.metadata or {}),
+            **metadata_updates,
+        }
+        self._deployment_repo.update(deployment)
     
     # ============================================
     # HELPERS
     # ============================================
+
+    def _apply_default_inputs(
+        self,
+        template: ApplicationTemplate,
+        user_inputs: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Merge template defaults with caller-provided inputs."""
+        resolved = dict(user_inputs)
+        for field in template.required_inputs:
+            value = resolved.get(field.field_name)
+            if (value is None or value == "") and field.default_value is not None:
+                resolved[field.field_name] = field.default_value
+        return resolved
     
     def _validate_inputs(self, template: ApplicationTemplate, user_inputs: Dict[str, Any]) -> None:
         """Validate user inputs against template requirements."""
@@ -240,6 +349,7 @@ class DomainService:
         template: ApplicationTemplate,
         user_inputs: Dict[str, Any],
         application_id: UUID,
+        deployment_id: UUID,
     ) -> Dict[str, Any]:
         """
         Resolve template variables with user inputs.
@@ -248,14 +358,29 @@ class DomainService:
         - {{field_name}} - user input
         - {{application_id}} - generated ID
         - {{application_id_short}} - first 8 chars
+        - {{deployment_id}} - generated deployment ID
+        - {{deployment_id_short}} - first 8 chars
         """
         import json
+
+        db_host = getattr(database_settings, "mysql_host", "localhost")
+        db_port = getattr(database_settings, "mysql_port", 3306)
+        db_user = getattr(database_settings, "mysql_root_user", "root")
+        db_password = getattr(database_settings, "mysql_root_password", "")
+        db_name = f"wp_{str(application_id)[:8]}_{str(deployment_id)[:8]}"
         
         # Create variable map
         variables = {
+            **user_inputs,
             "application_id": str(application_id),
             "application_id_short": str(application_id)[:8],
-            **user_inputs,
+            "deployment_id": str(deployment_id),
+            "deployment_id_short": str(deployment_id)[:8],
+            "db_host": db_host,
+            "db_port": db_port,
+            "db_name": db_name,
+            "db_user": db_user,
+            "db_password": db_password,
         }
         
         # Serialize template to JSON

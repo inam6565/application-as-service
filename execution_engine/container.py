@@ -6,6 +6,8 @@ from execution_engine.infrastructure.postgres.domain_repository import (
     ApplicationTemplateRepository,
     ApplicationRepository,
     DeploymentRepository,
+    DeployedResourceRepository,
+    DeploymentStepExecutionRepository,
 )
 from execution_engine.infrastructure.postgres.node_repository import NodeRepository
 
@@ -14,6 +16,7 @@ from execution_engine.core.events import MultiEventEmitter, PrintEventEmitter
 
 from execution_engine.domain.service import DomainService
 from execution_engine.node_manager.service import NodeManagerService
+from execution_engine.orchestrator.deployment_orchestrator import DeploymentOrchestrator
 
 
 # ============================================
@@ -27,6 +30,8 @@ execution_repository = PostgresExecutionRepository()
 template_repository = ApplicationTemplateRepository()
 application_repository = ApplicationRepository()
 deployment_repository = DeploymentRepository()
+resource_repository = DeployedResourceRepository()
+step_execution_repository = DeploymentStepExecutionRepository()
 
 # Node Manager
 node_repository = NodeRepository()
@@ -56,11 +61,22 @@ domain_service = DomainService(
     template_repo=template_repository,
     app_repo=application_repository,
     deployment_repo=deployment_repository,
+    resource_repo=resource_repository,
+    step_repo=step_execution_repository,
 )
 
 # Node Manager Service
 node_manager_service = NodeManagerService(
     node_repo=node_repository,
+)
+
+deployment_orchestrator = DeploymentOrchestrator(
+    domain_service=domain_service,
+    execution_service=execution_service,
+    node_manager_service=node_manager_service,
+    deployment_repo=deployment_repository,
+    resource_repo=resource_repository,
+    step_repo=step_execution_repository,
 )
 
 
@@ -74,12 +90,15 @@ __all__ = [
     'template_repository',
     'application_repository',
     'deployment_repository',
+    'resource_repository',
+    'step_execution_repository',
     'node_repository',
     
     # Services
     'execution_service',
     'domain_service',
     'node_manager_service',
+    'deployment_orchestrator',
     
     # Events
     'emitters',

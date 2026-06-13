@@ -42,7 +42,7 @@ def get_execution(
     execution_id: UUID,
     service=Depends(get_execution_service),
 ):
-    execution = service._repo.get(execution_id)
+    execution = service.get_execution(execution_id)
 
     if not execution:
         raise HTTPException(status_code=404, detail="Execution not found")

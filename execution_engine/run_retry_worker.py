@@ -5,6 +5,7 @@ import logging
 import time
 import signal
 import sys
+import threading
 
 from execution_engine.container import execution_repository, execution_service
 from execution_engine.executor.retry_service import RetryService
@@ -55,9 +56,9 @@ class RetryWorker:
         logger.info("=" * 80)
         logger.info("")
         
-        # Register signal handlers
-        signal.signal(signal.SIGINT, self._signal_handler)
-        signal.signal(signal.SIGTERM, self._signal_handler)
+        if threading.current_thread() is threading.main_thread():
+            signal.signal(signal.SIGINT, self._signal_handler)
+            signal.signal(signal.SIGTERM, self._signal_handler)
         
         # Main loop
         while not self._stop_requested:
@@ -71,6 +72,10 @@ class RetryWorker:
                 time.sleep(self.poll_interval)
         
         logger.info("Retry Worker stopped")
+
+    def stop(self):
+        """Request graceful shutdown."""
+        self._stop_requested = True
     
     def _signal_handler(self, signum, frame):
         """Handle shutdown signals."""

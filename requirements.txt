@@ -34,6 +34,7 @@ packaging==25.0
 passlib==1.7.4
 pluggy==1.6.0
 psycopg2-binary==2.9.11
+PyMySQL==1.1.1
 pyasn1==0.6.1
 pycparser==2.23
 pydantic==2.12.5

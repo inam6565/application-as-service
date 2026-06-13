@@ -2,6 +2,7 @@
 """Event emitters for execution engine."""
 
 from abc import ABC, abstractmethod
+import logging
 from typing import Iterable
 
 from execution_engine.core.events_model import ExecutionEvent
@@ -45,8 +46,7 @@ class PrintEventEmitter(EventEmitter):
             # Store in-memory
             self.events.append(event)
             
-            # Print for manual verification
-            print(f"[EVENT] {event.event_type} | execution={event.execution_id}")
+            logger.info("[EVENT] %s | execution=%s", event.event_type, event.execution_id)
 
 
 class MultiEventEmitter:
@@ -67,3 +67,4 @@ class NullEventEmitter(EventEmitter):
     def emit(self, events: Iterable[ExecutionEvent]) -> None:
         """Do nothing."""
         pass
+logger = logging.getLogger(__name__)

@@ -23,7 +23,7 @@ class DeploymentResult:
 class RuntimeAgentClient:
     """Client for communicating with Runtime Agent."""
     
-    def __init__(self, agent_url: str, timeout: int = 120):
+    def __init__(self, agent_url: str, timeout: int = 600):
         """
         Initialize client.
         

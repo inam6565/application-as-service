@@ -9,15 +9,15 @@ import time
 import logging
 import signal
 import sys
+import threading
 import requests
 import socket
 from datetime import datetime, timezone
-from typing import List, Optional, Dict, Any
+from typing import List, Dict, Any
 from uuid import UUID
 
-from execution_engine.domain.models import HealthStatus, ResourceType
-from execution_engine.infrastructure.postgres.database import engine
-from sqlalchemy import text
+from execution_engine.domain.models import HealthStatus
+from execution_engine.container import resource_repository
 
 # Setup logging
 logging.basicConfig(
@@ -74,9 +74,9 @@ class HealthChecker:
         logger.info("=" * 80)
         logger.info("")
         
-        # Register signal handlers
-        signal.signal(signal.SIGINT, self._signal_handler)
-        signal.signal(signal.SIGTERM, self._signal_handler)
+        if threading.current_thread() is threading.main_thread():
+            signal.signal(signal.SIGINT, self._signal_handler)
+            signal.signal(signal.SIGTERM, self._signal_handler)
         
         # Main loop
         while not self._stop_requested:
@@ -90,6 +90,10 @@ class HealthChecker:
                 time.sleep(self.check_interval)
         
         logger.info("Health Checker stopped")
+
+    def stop(self):
+        """Request graceful shutdown."""
+        self._stop_requested = True
     
     def _signal_handler(self, signum, frame):
         """Handle shutdown signals."""
@@ -129,49 +133,23 @@ class HealthChecker:
         Returns:
             List of container records
         """
-        with engine.connect() as conn:
-            result = conn.execute(text("""
-                SELECT 
-                    dr.resource_id,
-                    dr.deployment_id,
-                    dr.external_id,
-                    dr.name,
-                    dr.spec,
-                    dr.node_id,
-                    dr.health_status,
-                    dr.consecutive_health_failures,
-                    dr.last_health_check_at,
-                    n.runtime_agent_url
-                FROM deployed_resources dr
-                JOIN infrastructure_nodes n ON dr.node_id = n.node_id
-                WHERE dr.resource_type = 'CONTAINER'
-                AND dr.status = 'running'
-                AND dr.external_id != 'pending'  -- ✅ ADD: Exclude pending
-                ORDER BY dr.last_health_check_at ASC NULLS FIRST
-            """))
-            
-            containers = []
-            for row in result:
-                # ✅ FIX: Parse spec if it's a string
-                spec = row[4]
-                if isinstance(spec, str):
-                    import json
-                    spec = json.loads(spec)
-                
-                containers.append({
-                    'resource_id': row[0],
-                    'deployment_id': row[1],
-                    'external_id': row[2],
-                    'name': row[3],
-                    'spec': spec,
-                    'node_id': row[5],
-                    'health_status': row[6],
-                    'consecutive_failures': row[7],
-                    'last_check_at': row[8],
-                    'runtime_agent_url': row[9],
-                })
-            
-            return containers
+        rows = resource_repository.list_running_containers_for_health_check(limit=100)
+        containers = []
+        for row in rows:
+            resource = row["resource"]
+            containers.append({
+                'resource_id': resource.resource_id,
+                'deployment_id': resource.deployment_id,
+                'external_id': resource.external_id,
+                'name': resource.name,
+                'spec': resource.spec,
+                'node_id': resource.node_id,
+                'health_status': resource.health_status,
+                'consecutive_failures': resource.consecutive_health_failures,
+                'last_check_at': resource.last_health_check_at,
+                'runtime_agent_url': row["runtime_agent_url"],
+            })
+        return containers
     
     def _check_container_health(self, container: Dict[str, Any]):
         """
@@ -447,23 +425,15 @@ class HealthChecker:
             else:
                 new_status = HealthStatus.HEALTHY  # Still healthy, but tracking failures
         
-        with engine.connect() as conn:
-            conn.execute(
-                text("""
-                    UPDATE deployed_resources
-                    SET health_status = :status,
-                        consecutive_health_failures = :failures,
-                        last_health_check_at = :checked_at
-                    WHERE resource_id = :resource_id
-                """),
-                {
-                    'status': new_status.value,
-                    'failures': new_failures,
-                    'checked_at': now,
-                    'resource_id': resource_id
-                }
-            )
-            conn.commit()
+        resource = resource_repository.get(resource_id)
+        if not resource:
+            logger.warning(f"[{resource_id}] Resource not found while updating health")
+            return
+
+        resource.health_status = new_status
+        resource.consecutive_health_failures = new_failures
+        resource.last_health_check_at = now
+        resource_repository.update(resource)
     
     def _handle_unhealthy_container(self, container: Dict[str, Any]):
         """
@@ -482,10 +452,6 @@ class HealthChecker:
                 f"in {self.restart_delay}s"
             )
             
-            # Wait before restarting (avoid restart loops)
-            time.sleep(self.restart_delay)
-            
-            # Restart container via Runtime Agent
             self._restart_container(container)
     
     def _restart_container(self, container: Dict[str, Any]):
@@ -511,21 +477,11 @@ class HealthChecker:
             if response.status_code == 200:
                 logger.info(f"[{resource_id}] ✅ Container restarted successfully")
                 
-                # Reset health status to STARTING
-                with engine.connect() as conn:
-                    conn.execute(
-                        text("""
-                            UPDATE deployed_resources
-                            SET health_status = :status,
-                                consecutive_health_failures = 0
-                            WHERE resource_id = :resource_id
-                        """),
-                        {
-                            'status': HealthStatus.STARTING.value,
-                            'resource_id': resource_id
-                        }
-                    )
-                    conn.commit()
+                resource = resource_repository.get(resource_id)
+                if resource:
+                    resource.health_status = HealthStatus.STARTING
+                    resource.consecutive_health_failures = 0
+                    resource_repository.update(resource)
             else:
                 logger.error(
                     f"[{resource_id}] Failed to restart container: "

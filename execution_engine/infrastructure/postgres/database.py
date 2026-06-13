@@ -5,7 +5,7 @@
 from contextlib import contextmanager
 from typing import Generator, Optional
 
-from sqlalchemy import create_engine, event
+from sqlalchemy import create_engine
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import declarative_base, sessionmaker, Session
 from sqlalchemy.pool import NullPool, QueuePool
@@ -36,14 +36,6 @@ def create_db_engine(database_url: Optional[str] = None) -> Engine:
         pool_timeout=settings.pool_timeout,
         pool_recycle=settings.pool_recycle,
     )
-    
-    # Set PostgreSQL-specific settings
-    @event.listens_for(engine, "connect")
-    def set_search_path(dbapi_conn, connection_record):
-        """Set default schema on connect."""
-        cursor = dbapi_conn.cursor()
-        cursor.execute("SET search_path TO public")
-        cursor.close()
     
     return engine
 

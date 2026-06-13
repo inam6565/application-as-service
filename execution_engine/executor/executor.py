@@ -12,6 +12,8 @@ from execution_engine.executor.slots import SlotManager
 from execution_engine.executor.runtime_executor import RuntimeExecutor
 from execution_engine.core.models import ExecutionState
 from execution_engine.core.errors import ExecutionLeaseError
+from execution_engine.domain.models import HealthStatus
+from execution_engine.container import resource_repository
 
 logger = logging.getLogger(__name__)
 
@@ -265,10 +267,6 @@ class Executor:
             deployment_result: Deployment result from runtime agent
         """
         try:
-            from execution_engine.infrastructure.postgres.database import engine
-            from sqlalchemy import text
-            import json
-            
             container_id = deployment_result.get('container_id')
             if not container_id:
                 logger.warning(f"[executor] No container_id in deployment result")
@@ -277,55 +275,22 @@ class Executor:
             logger.info(f"[executor] Updating deployed resource for execution {execution_id}")
             logger.info(f"[executor] Container ID: {container_id}")
             
-            # Find resource by execution_id in spec
-            with engine.connect() as conn:
-                # ✅ STEP 1: Get the current spec
-                result = conn.execute(
-                    text("""
-                        SELECT resource_id, spec
-                        FROM deployed_resources
-                        WHERE spec->>'execution_id' = :execution_id
-                    """),
-                    {'execution_id': str(execution_id)}
-                )
-                
-                row = result.fetchone()
-                
-                if not row:
-                    logger.warning(f"[executor] No deployed resource found for execution {execution_id}")
-                    return
-                
-                resource_id = row[0]
-                current_spec = row[1]
-                
-                logger.info(f"[executor] Found resource {resource_id}")
-                
-                # ✅ STEP 2: Merge deployment_result into spec (in Python, not SQL)
-                if isinstance(current_spec, str):
-                    current_spec = json.loads(current_spec)
-                
-                current_spec['deployment_result'] = deployment_result
-                
-                # ✅ STEP 3: Update with merged spec (NO jsonb_set!)
-                conn.execute(
-                    text("""
-                        UPDATE deployed_resources
-                        SET external_id = :container_id,
-                            status = 'running',
-                            health_status = 'STARTING',
-                            spec = :spec_json
-                        WHERE resource_id = :resource_id
-                    """),
-                    {
-                        'container_id': container_id,
-                        'spec_json': json.dumps(current_spec),
-                        'resource_id': resource_id
-                    }
-                )
-                
-                conn.commit()
-                logger.info(f"[executor] ✅ Updated deployed resource {resource_id} with container {container_id}")
-                logger.info(f"[executor] Status: running, Health: STARTING")
+            resource = resource_repository.get_by_execution_id(execution_id)
+            if not resource:
+                logger.warning(f"[executor] No deployed resource found for execution {execution_id}")
+                return
+
+            resource.spec = {
+                **resource.spec,
+                "deployment_result": deployment_result,
+            }
+            resource.external_id = container_id
+            resource.status = "running"
+            resource.health_status = HealthStatus.STARTING
+            resource_repository.update(resource)
+
+            logger.info(f"[executor] ✅ Updated deployed resource {resource.resource_id} with container {container_id}")
+            logger.info(f"[executor] Status: running, Health: STARTING")
             
         except Exception as e:
             logger.error(f"[executor] ❌ Error updating deployed resource: {e}", exc_info=True)

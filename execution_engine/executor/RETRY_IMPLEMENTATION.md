@@ -211,33 +211,17 @@ python test_retry_logic.py
 11. **t=136s:** Executor tries final attempt 4, fails
 12. **t=136s:** Max retries reached, no more retries
 
-### Verification Queries
+### Verification
 
-```sql
--- Check execution retry status
-SELECT 
-    execution_id,
-    state,
-    retry_count,
-    max_retries,
-    error_message,
-    finished_at
-FROM executions
-WHERE retry_count > 0
-ORDER BY created_at DESC;
+Use the application API or repository-backed test helpers to inspect retry state.
+For deployment-related executions, call:
 
--- Check retry timeline
-SELECT 
-    execution_id,
-    state,
-    retry_count,
-    finished_at,
-    EXTRACT(EPOCH FROM (NOW() - finished_at)) AS seconds_since_failure
-FROM executions
-WHERE state = 'FAILED'
-AND retry_count < max_retries
-ORDER BY finished_at DESC;
+```bash
+curl http://localhost:8000/deployments/{deployment_id}/executions
 ```
+
+The response includes `state`, `retry_count`, `error_message`, and
+`deployment_result` for each execution.
 
 ## Configuration
 

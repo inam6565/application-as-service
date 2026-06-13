@@ -2,6 +2,7 @@
 """Deployment orchestrator - coordinates multi-step deployments."""
 
 import time
+import logging
 from typing import Dict, Any, Optional
 from uuid import UUID, uuid4
 from datetime import datetime, timezone
@@ -14,7 +15,14 @@ from execution_engine.domain.models import (
 from execution_engine.core.service import ExecutionService
 from execution_engine.core.models import Execution, ExecutionState
 from execution_engine.node_manager.service import NodeManagerService
-from execution_engine.infrastructure.postgres.domain_repository import DeploymentRepository
+from execution_engine.infrastructure.postgres.domain_repository import (
+    DeploymentRepository,
+    DeployedResourceRepository,
+    DeploymentStepExecutionRepository,
+)
+from execution_engine.infrastructure.mysql.provisioner import MySQLProvisioner
+
+logger = logging.getLogger(__name__)
 
 
 class DeploymentOrchestrator:
@@ -38,11 +46,16 @@ class DeploymentOrchestrator:
         execution_service: ExecutionService,
         node_manager_service: NodeManagerService,
         deployment_repo: DeploymentRepository,
+        resource_repo: DeployedResourceRepository = None,
+        step_repo: DeploymentStepExecutionRepository = None,
     ):
         self._domain_service = domain_service
         self._execution_service = execution_service
         self._node_manager_service = node_manager_service
         self._deployment_repo = deployment_repo
+        self._resource_repo = resource_repo or DeployedResourceRepository()
+        self._step_repo = step_repo or DeploymentStepExecutionRepository()
+        self._mysql_provisioner = MySQLProvisioner()
     
     def start_deployment(self, deployment_id: UUID) -> None:
         """
@@ -58,7 +71,7 @@ class DeploymentOrchestrator:
         if not deployment:
             raise ValueError(f"Deployment {deployment_id} not found")
         
-        print(f"[orchestrator] starting deployment {deployment_id}")
+        logger.info("[orchestrator] starting deployment %s", deployment_id)
         
         # Get template
         template = self._domain_service.get_template(deployment.template_id)
@@ -70,26 +83,38 @@ class DeploymentOrchestrator:
         deployment.started_at = datetime.now(timezone.utc)
         self._deployment_repo.update(deployment)
         
-        print(f"[orchestrator] deployment has {len(template.deployment_steps)} steps")
+        logger.info("[orchestrator] deployment has %s steps", len(template.deployment_steps))
         
         try:
+            step_results: Dict[str, Dict[str, Any]] = {}
+
             # Execute steps sequentially (create executions)
             for step_def in sorted(template.deployment_steps, key=lambda s: s.order):
-                print(f"[orchestrator] processing step {step_def.order}: {step_def.step_id}")
+                logger.info("[orchestrator] processing step %s: %s", step_def.order, step_def.step_id)
                 
+                step_execution = self._start_step(deployment, step_def)
                 try:
-                    self._execute_step(deployment, step_def)
+                    result = self._execute_step(
+                        deployment,
+                        step_def,
+                        step_results,
+                        step_execution,
+                    )
+                    step_results[step_def.step_id] = result
+                    if step_def.step_type != "container":
+                        self._complete_step(step_execution, result)
                 except Exception as e:
-                    print(f"[orchestrator] step {step_def.step_id} failed: {e}")
+                    self._fail_step(step_execution, str(e))
+                    logger.exception("[orchestrator] step %s failed: %s", step_def.step_id, e)
                     raise
             
             # ✅ REMOVE ALL STATUS UPDATES HERE
             # Status updater will handle them!
             
-            print(f"[orchestrator] all executions queued, status updater will monitor")
+            logger.info("[orchestrator] all executions queued, status updater will monitor")
             
         except Exception as e:
-            print(f"[orchestrator] deployment {deployment_id} failed during orchestration: {e}")
+            logger.exception("[orchestrator] deployment %s failed during orchestration: %s", deployment_id, e)
             
             # ✅ Only mark as FAILED if orchestration itself fails
             # (not execution failures - status updater handles those)
@@ -99,14 +124,72 @@ class DeploymentOrchestrator:
             self._deployment_repo.update(deployment)
             
             raise
+
+    def _start_step(self, deployment, step_def) -> DeploymentStepExecution:
+        """Create or update a deployment step as running."""
+        existing = self._step_repo.get_by_deployment_step(
+            deployment.deployment_id,
+            step_def.step_id,
+        )
+        now = datetime.now(timezone.utc)
+        if existing:
+            existing.status = StepStatus.RUNNING
+            existing.error_message = None
+            existing.started_at = existing.started_at or now
+            self._step_repo.update(existing)
+            return existing
+
+        step_execution = DeploymentStepExecution(
+            step_execution_id=uuid4(),
+            deployment_id=deployment.deployment_id,
+            step_id=step_def.step_id,
+            step_name=step_def.step_name,
+            status=StepStatus.RUNNING,
+            started_at=now,
+        )
+        self._step_repo.create(step_execution)
+        deployment.current_step_index = max(deployment.current_step_index, step_def.order - 1)
+        self._deployment_repo.update(deployment)
+        return step_execution
+
+    def _complete_step(self, step_execution: DeploymentStepExecution, result: Dict[str, Any]) -> None:
+        """Mark a synchronous deployment step complete."""
+        now = datetime.now(timezone.utc)
+        step_execution.status = StepStatus.COMPLETED
+        step_execution.result = result
+        step_execution.completed_at = now
+        if step_execution.started_at:
+            step_execution.duration_seconds = (now - self._as_utc(step_execution.started_at)).total_seconds()
+        self._step_repo.update(step_execution)
+
+    def _fail_step(self, step_execution: DeploymentStepExecution, error_message: str) -> None:
+        """Mark a deployment step failed."""
+        now = datetime.now(timezone.utc)
+        step_execution.status = StepStatus.FAILED
+        step_execution.error_message = error_message
+        step_execution.completed_at = now
+        if step_execution.started_at:
+            step_execution.duration_seconds = (now - self._as_utc(step_execution.started_at)).total_seconds()
+        self._step_repo.update(step_execution)
+
+    def _as_utc(self, value: datetime) -> datetime:
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
   
-    def _execute_step(self, deployment, step_def) -> Dict[str, Any]:
+    def _execute_step(
+        self,
+        deployment,
+        step_def,
+        step_results: Dict[str, Dict[str, Any]],
+        step_execution: DeploymentStepExecution,
+    ) -> Dict[str, Any]:
         """
         Execute a single deployment step.
         
         Returns step result data.
         """
-        print(f"[orchestrator] executing step: {step_def.step_id}")
+        logger.info("[orchestrator] executing step: %s", step_def.step_id)
         
         # Get step configuration from resolved config
         step_config = None
@@ -126,14 +209,14 @@ class DeploymentOrchestrator:
             return self._execute_database_step(deployment, step_def, step_config)
         
         elif step_def.step_type == "container":
-            return self._execute_container_step(deployment, step_def, step_config)
+            return self._execute_container_step(deployment, step_def, step_config, step_results, step_execution)
         
         else:
             raise ValueError(f"Unknown step type: {step_def.step_type}")
     
     def _execute_volume_step(self, deployment, step_def, step_config) -> Dict[str, Any]:
         """Execute volume creation step (simplified for MVP)."""
-        print(f"[orchestrator] creating volume: {step_config['spec_template']['volume_name']}")
+        logger.info("[orchestrator] creating volume: %s", step_config['spec_template']['volume_name'])
         
         # For MVP: Just return success
         # In production: Create actual volume via Runtime Agent
@@ -143,42 +226,70 @@ class DeploymentOrchestrator:
             "status": "created"
         }
         
-        print(f"[orchestrator] volume created: {result}")
+        logger.info("[orchestrator] volume created: %s", result)
         
         return result
     
     def _execute_database_step(self, deployment, step_def, step_config) -> Dict[str, Any]:
-        """Execute database provisioning step (simplified for MVP)."""
+        """Execute database provisioning step on the shared MySQL host."""
         spec = step_config["spec_template"]
         
-        print(f"[orchestrator] provisioning database: {spec['db_name']}")
-        
-        # For MVP: Simulate DB provisioning
-        # In production: Call database provisioning service
-        
-        # Simulated DB connection details
+        logger.info("[orchestrator] provisioning database: %s", spec["db_name"])
+
+        db_details = self._mysql_provisioner.create_database(spec["db_name"])
         result = {
             "db_type": spec["db_type"],
-            "db_name": spec["db_name"],
+            "db_name": db_details["db_name"],
             "db_user": spec["db_user"],
-            "db_host": "mysql-server.local",  # From user input or platform DB server
-            "db_port": 3306,
-            "status": "ready"
+            "db_password": spec.get("db_password") or self._get_resolved_wordpress_db_password(deployment),
+            "db_host": db_details["db_host"],
+            "db_port": db_details["db_port"],
+            "status": "ready",
         }
+
+        self._domain_service.update_deployment_metadata(
+            deployment.deployment_id,
+            {
+                "database": {
+                    **{key: value for key, value in result.items() if key != "db_password"},
+                    "provisioned_at": datetime.now(timezone.utc).isoformat(),
+                }
+            },
+        )
         
-        print(f"[orchestrator] database provisioned: {result}")
+        logger.info(
+            "[orchestrator] database provisioned: %s",
+            {key: value for key, value in result.items() if key != "db_password"},
+        )
         
         return result
     
-    def _execute_container_step(self, deployment, step_def, step_config) -> Dict[str, Any]:
+    def _execute_container_step(
+        self,
+        deployment,
+        step_def,
+        step_config,
+        step_results: Dict[str, Dict[str, Any]],
+        step_execution: DeploymentStepExecution,
+    ) -> Dict[str, Any]:
         """
         Execute container deployment step.
         
         Creates execution and tracks deployed resource.
         """
-        spec = step_config["spec_template"]
+        spec = dict(step_config["spec_template"])
+        spec["ports"] = self._normalize_ports(spec.get("ports", {}))
+        spec["env"] = dict(spec.get("env", {}))
+        spec["labels"] = {
+            **dict(spec.get("labels", {})),
+            "application_id": str(deployment.application_id),
+            "deployment_id": str(deployment.deployment_id),
+        }
+        self._inject_database_env(spec, step_results)
+        step_config["spec_template"] = spec
+        self._persist_resolved_step_config(deployment, step_config)
         
-        print(f"[orchestrator] deploying container: {spec['name']}")
+        logger.info("[orchestrator] deploying container: %s", spec['name'])
         
         # Parse resource requirements
         resources = spec.get("resources", {})
@@ -197,7 +308,7 @@ class DeploymentOrchestrator:
         if not node:
             raise RuntimeError("No suitable infrastructure node available")
         
-        print(f"[orchestrator] selected node: {node.node_name}")
+        logger.info("[orchestrator] selected node: %s", node.node_name)
         
         # Create execution
         execution = Execution(
@@ -205,6 +316,7 @@ class DeploymentOrchestrator:
             tenant_id=deployment.tenant_id,
             application_id=deployment.application_id,
             deployment_id=deployment.deployment_id,
+            step_execution_id=step_execution.step_execution_id,
             execution_type="deploy",
             runtime_type="docker",
             spec={
@@ -217,12 +329,13 @@ class DeploymentOrchestrator:
         # Register and queue execution
         self._execution_service.register_execution(execution)
         self._execution_service.queue_execution(execution.execution_id)
+        step_execution.execution_id = execution.execution_id
+        step_execution.result = {"execution_id": str(execution.execution_id), "status": "queued"}
+        self._step_repo.update(step_execution)
         
-        print(f"[orchestrator] created execution {execution.execution_id}")
+        logger.info("[orchestrator] created execution %s", execution.execution_id)
         
-        # ✅ ADD: Track as deployed resource
         from execution_engine.domain.models import DeployedResource, ResourceType, HealthStatus
-        from execution_engine.infrastructure.postgres.domain_repository import DeployedResourceRepository
         
         # Convert health check to dict
         health_check_dict = None
@@ -254,10 +367,9 @@ class DeploymentOrchestrator:
             health_status=HealthStatus.UNKNOWN,
         )
         
-        resource_repo = DeployedResourceRepository()
-        resource_repo.create(deployed_resource)
+        self._resource_repo.create(deployed_resource)
         
-        print(f"[orchestrator] tracked deployed resource {deployed_resource.resource_id}")
+        logger.info("[orchestrator] tracked deployed resource %s", deployed_resource.resource_id)
         
         # Return result
         result = {
@@ -269,7 +381,7 @@ class DeploymentOrchestrator:
             'status': "queued",
         }
         
-        print(f"[orchestrator] container deployment queued: {result}")
+        logger.info("[orchestrator] container deployment queued: %s", result)
         
         return result
    
@@ -301,14 +413,14 @@ class DeploymentOrchestrator:
         
         while True:
             # Get current execution state
-            execution = self._execution_service._repo.get(execution_id)
+            execution = self._execution_service.get_execution(execution_id)
             
             if not execution:
                 raise RuntimeError(f"Execution {execution_id} not found")
             
             # Check if completed
             if execution.state == ExecutionState.COMPLETED:
-                print(f"[orchestrator] execution {execution_id} completed successfully")
+                logger.info("[orchestrator] execution %s completed successfully", execution_id)
                 
                 result = {
                     "execution_id": str(execution.execution_id),
@@ -321,7 +433,7 @@ class DeploymentOrchestrator:
             # Check if failed
             if execution.state == ExecutionState.FAILED:
                 error_msg = execution.error_message or "Unknown error"
-                print(f"[orchestrator] execution {execution_id} failed: {error_msg}")
+                logger.info("[orchestrator] execution %s failed: %s", execution_id, error_msg)
                 raise RuntimeError(f"Execution failed: {error_msg}")
             
             # Check timeout
@@ -331,7 +443,12 @@ class DeploymentOrchestrator:
             
             # Log progress
             if elapsed % 10 == 0:  # Log every 10 seconds
-                print(f"[orchestrator] execution {execution_id} still running (state: {execution.state.value}, elapsed: {int(elapsed)}s)")
+                logger.info(
+                    "[orchestrator] execution %s still running (state: %s, elapsed: %ss)",
+                    execution_id,
+                    execution.state.value,
+                    int(elapsed),
+                )
             
             # Wait before next poll
             time.sleep(poll_interval)
@@ -351,3 +468,44 @@ class DeploymentOrchestrator:
         else:
             # Assume MB
             return int(memory_str)
+
+    def _inject_database_env(
+        self,
+        spec: Dict[str, Any],
+        step_results: Dict[str, Dict[str, Any]],
+    ) -> None:
+        """Inject provisioned database details into WordPress container env."""
+        database = step_results.get("provision-database")
+        if not database:
+            return
+
+        env = spec.setdefault("env", {})
+        env["WORDPRESS_DB_HOST"] = f"{database['db_host']}:{database['db_port']}"
+        env["WORDPRESS_DB_NAME"] = database["db_name"]
+        env["WORDPRESS_DB_USER"] = database["db_user"]
+        env["WORDPRESS_DB_PASSWORD"] = database["db_password"]
+
+    def _persist_resolved_step_config(self, deployment, step_config: Dict[str, Any]) -> None:
+        """Persist runtime-injected step values so execution/debug views match Docker payload."""
+        for index, step in enumerate(deployment.resolved_config.get("steps", [])):
+            if step.get("step_id") == step_config.get("step_id"):
+                deployment.resolved_config["steps"][index] = step_config
+                self._deployment_repo.update(deployment)
+                return
+
+    def _get_resolved_wordpress_db_password(self, deployment) -> str:
+        """Read DB password from an older resolved WordPress container spec."""
+        for step in deployment.resolved_config.get("steps", []):
+            if step.get("step_id") == "deploy-wordpress":
+                env = step.get("spec_template", {}).get("env", {})
+                password = env.get("WORDPRESS_DB_PASSWORD")
+                if password:
+                    return password
+        raise ValueError("WordPress database password missing from resolved deployment config")
+
+    def _normalize_ports(self, ports: Dict[str, Any]) -> Dict[str, int]:
+        """Normalize UI/template port values before sending them to the runtime agent."""
+        normalized: Dict[str, int] = {}
+        for container_port, host_port in ports.items():
+            normalized[str(container_port)] = int(host_port)
+        return normalized

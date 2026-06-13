@@ -1,18 +1,24 @@
-#execution_engine\api\container.py
-from execution_engine.infrastructure.postgres.repository import PostgresExecutionRepository
-from execution_engine.infrastructure.postgres.config import POSTGRES_DSN
-from execution_engine.core.service import ExecutionService
-from execution_engine.core.events import MultiEventEmitter
-from execution_engine.container import execution_service  
+"""FastAPI dependency providers."""
+
+from execution_engine.container import (
+    deployment_orchestrator,
+    domain_service,
+    execution_service,
+    node_manager_service,
+)
 
 
-# Singletons
-_repository = PostgresExecutionRepository(POSTGRES_DSN)
-_emitters = MultiEventEmitter([])
-_service = ExecutionService(_repository, _emitters)
-
-
-def get_execution_service() -> ExecutionService:
-    return _service
 def get_execution_service():
     return execution_service
+
+
+def get_domain_service():
+    return domain_service
+
+
+def get_node_manager_service():
+    return node_manager_service
+
+
+def get_deployment_orchestrator():
+    return deployment_orchestrator

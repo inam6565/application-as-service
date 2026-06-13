@@ -31,6 +31,14 @@ class ExecutionService:
         self._emit([
             ExecutionEvent.execution_registered(execution)
         ])
+
+    def get_execution(self, execution_id: UUID):
+        """Get execution by ID."""
+        return self._repo.get(execution_id)
+
+    def list_deployment_executions(self, deployment_id: UUID, limit: int = 100):
+        """List executions for a deployment."""
+        return list(self._repo.list_by_deployment(deployment_id, limit=limit))
     
     # -------------------------
     # QUEUE
@@ -165,7 +173,8 @@ class ExecutionService:
         self._repo.finalize(
             execution_id=execution_id,
             worker_id=worker_id,
-            final_state=ExecutionState.FAILED
+            final_state=ExecutionState.FAILED,
+            error_message=reason,
         )
         
         # Refresh and emit

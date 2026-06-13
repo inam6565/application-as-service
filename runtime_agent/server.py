@@ -43,6 +43,7 @@ class ContainerSpec(BaseModel):
     volumes: List[str] = Field(default_factory=list, description="Volume mounts")
     restart_policy: str = Field(default="always", description="Restart policy")
     labels: Dict[str, str] = Field(default_factory=dict, description="Container labels")
+    pull_policy: str = Field(default="missing", description="Image pull policy: missing or always")
 
 
 class DeployRequest(BaseModel):
@@ -134,14 +135,25 @@ async def deploy_container(request: DeployRequest):
     
     try:
         logger.info(f"[{request.execution_id}] Starting deployment: {spec.name}")
+
+        existing = _get_container_by_name(spec.name)
+        if existing:
+            if existing.status == "running" and _container_matches_spec(existing, spec):
+                logger.info(f"[{request.execution_id}] Reusing matching running container: {spec.name}")
+                return _container_response(existing, spec.ports)
+
+            logger.info(f"[{request.execution_id}] Removing stale container before recreate: {spec.name}")
+            existing.remove(force=True)
         
-        # Step 1: Pull image
-        logger.info(f"[{request.execution_id}] Pulling image: {spec.image}")
-        try:
-            docker_client.images.pull(spec.image)
-            logger.info(f"[{request.execution_id}] ✅ Image pulled")
-        except docker.errors.ImageNotFound:
-            raise HTTPException(status_code=404, detail=f"Image not found: {spec.image}")
+        if spec.pull_policy == "always" or not _image_exists(spec.image):
+            logger.info(f"[{request.execution_id}] Pulling image: {spec.image}")
+            try:
+                docker_client.images.pull(spec.image)
+                logger.info(f"[{request.execution_id}] Image pulled")
+            except docker.errors.ImageNotFound:
+                raise HTTPException(status_code=404, detail=f"Image not found: {spec.image}")
+        else:
+            logger.info(f"[{request.execution_id}] Using local image: {spec.image}")
         
         # Step 2: Prepare container config
         container_config = {
@@ -174,31 +186,15 @@ async def deploy_container(request: DeployRequest):
         # Step 3: Create container
         logger.info(f"[{request.execution_id}] Creating container: {spec.name}")
         container = docker_client.containers.create(**container_config)
-        logger.info(f"[{request.execution_id}] ✅ Container created: {container.id[:12]}")
+        logger.info(f"[{request.execution_id}] Container created: {container.id[:12]}")
         
         # Step 4: Start container
         logger.info(f"[{request.execution_id}] Starting container")
         container.start()
         
-        # Step 5: Get container details
         container.reload()
-        
-        # Get internal IP
-        internal_ip = None
-        networks = container.attrs.get('NetworkSettings', {}).get('Networks', {})
-        if networks:
-            first_network = list(networks.values())[0]
-            internal_ip = first_network.get('IPAddress')
-        
-        logger.info(f"[{request.execution_id}] ✅ Container started successfully")
-        
-        return DeployResponse(
-            container_id=container.id,
-            container_name=container.name,
-            status=container.status,
-            internal_ip=internal_ip,
-            ports=spec.ports,
-        )
+        logger.info(f"[{request.execution_id}] Container started successfully")
+        return _container_response(container, spec.ports)
         
     except docker.errors.APIError as e:
         logger.error(f"[{request.execution_id}] Docker API error: {e}")
@@ -206,6 +202,62 @@ async def deploy_container(request: DeployRequest):
     except Exception as e:
         logger.error(f"[{request.execution_id}] Deployment failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+def _image_exists(image: str) -> bool:
+    try:
+        docker_client.images.get(image)
+        return True
+    except docker.errors.ImageNotFound:
+        return False
+
+
+def _get_container_by_name(name: str):
+    try:
+        return docker_client.containers.get(name)
+    except docker.errors.NotFound:
+        return None
+
+
+def _container_response(container, ports: Dict[str, int]) -> DeployResponse:
+    container.reload()
+    internal_ip = None
+    networks = container.attrs.get("NetworkSettings", {}).get("Networks", {})
+    if networks:
+        first_network = list(networks.values())[0]
+        internal_ip = first_network.get("IPAddress")
+
+    return DeployResponse(
+        container_id=container.id,
+        container_name=container.name,
+        status=container.status,
+        internal_ip=internal_ip,
+        ports=ports,
+    )
+
+
+def _container_matches_spec(container, spec: ContainerSpec) -> bool:
+    container.reload()
+    env_items = container.attrs.get("Config", {}).get("Env", []) or []
+    current_env = {}
+    for item in env_items:
+        if "=" in item:
+            key, value = item.split("=", 1)
+            current_env[key] = value
+
+    for key, value in spec.environment.items():
+        if current_env.get(key) != value:
+            return False
+
+    current_ports = container.attrs.get("HostConfig", {}).get("PortBindings", {}) or {}
+    for container_port, host_port in spec.ports.items():
+        bindings = current_ports.get(container_port)
+        if not bindings:
+            return False
+        if str(bindings[0].get("HostPort")) != str(host_port):
+            return False
+
+    return True
 
 
 @app.get("/containers/{container_id}/status", response_model=ContainerStatusResponse)

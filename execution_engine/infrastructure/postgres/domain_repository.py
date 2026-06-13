@@ -2,7 +2,9 @@
 
 """Domain repository implementations."""
 
-from typing import List, Optional
+from copy import deepcopy
+from typing import Any, Dict, List, Optional
+import logging
 from uuid import UUID
 
 from sqlalchemy.orm import sessionmaker
@@ -10,15 +12,17 @@ from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from execution_engine.domain.models import (
     Application, ApplicationTemplate, Deployment, DeploymentStepExecution,
-    DeployedResource, Domain, ProvisionedDatabase
+    DeployedResource, Domain, ProvisionedDatabase, DeploymentStatus, ResourceType
 )
 from execution_engine.infrastructure.postgres.database import SessionLocal
 from execution_engine.infrastructure.postgres.models import (
     ApplicationORM, ApplicationTemplateORM, DeploymentORM,
     DeploymentStepExecutionORM, DeployedResourceORM, DomainORM,
-    ProvisionedDatabaseORM
+    ProvisionedDatabaseORM, InfrastructureNodeORM
 )
 from execution_engine.core.errors import ExecutionConcurrencyError
+
+logger = logging.getLogger(__name__)
 
 
 # ============================================
@@ -128,7 +132,144 @@ def deployment_to_orm(deployment: Deployment) -> DeploymentORM:
         created_at=deployment.created_at,
         started_at=deployment.started_at,
         completed_at=deployment.completed_at,
-        metadata=deployment.metadata,
+        deployment_metadata=deployment.metadata,
+    )
+
+
+def template_from_orm(orm: ApplicationTemplateORM) -> ApplicationTemplate:
+    """Convert template ORM to domain model."""
+    from execution_engine.domain.models import (
+        DeploymentStepDefinition, HealthCheckDefinition,
+        ResourceLimits, TemplateInputField
+    )
+
+    if orm.template_id == "wordpress":
+        from execution_engine.domain.templates.wordpress import WORDPRESS_TEMPLATE
+
+        template = deepcopy(WORDPRESS_TEMPLATE)
+        template.created_at = orm.created_at
+        template.updated_at = orm.updated_at
+        template.is_active = orm.is_active
+        return template
+
+    required_inputs = [
+        TemplateInputField(**field)
+        for field in orm.required_inputs
+    ]
+
+    return ApplicationTemplate(
+        template_id=orm.template_id,
+        name=orm.name,
+        description=orm.description,
+        version=orm.version,
+        category=orm.category,
+        icon_url=orm.icon_url,
+        deployment_steps=[
+            DeploymentStepDefinition(
+                step_id=step["step_id"],
+                step_name=step["step_name"],
+                step_type=step["step_type"],
+                order=step["order"],
+                depends_on=step.get("depends_on", []),
+                spec_template=step.get("spec_template", {}),
+                health_check=HealthCheckDefinition(**step["health_check"]) if step.get("health_check") else None,
+                timeout_seconds=step.get("timeout_seconds", 300),
+                retry_on_failure=step.get("retry_on_failure", True),
+                max_retries=step.get("max_retries", 3),
+                cleanup_on_failure=step.get("cleanup_on_failure", True),
+            )
+            for step in orm.deployment_steps
+        ],
+        database_required=orm.database_required,
+        database_type=orm.database_type,
+        required_inputs=required_inputs,
+        default_resources=ResourceLimits(**orm.default_resources) if orm.default_resources else None,
+        created_at=orm.created_at,
+        updated_at=orm.updated_at,
+        is_active=orm.is_active,
+    )
+
+
+def application_from_orm(orm: ApplicationORM) -> Application:
+    """Convert application ORM to domain model."""
+    from execution_engine.domain.models import ResourceLimits
+
+    return Application(
+        application_id=orm.application_id,
+        tenant_id=orm.tenant_id,
+        template_id=orm.template_id,
+        template_version=orm.template_version,
+        name=orm.name,
+        description=orm.description,
+        user_inputs=orm.user_inputs,
+        current_deployment_id=orm.current_deployment_id,
+        status=orm.status,
+        health_status=orm.health_status,
+        domain=orm.domain,
+        public_url=orm.public_url,
+        ssl_enabled=orm.ssl_enabled,
+        resource_limits=ResourceLimits(**orm.resource_limits) if orm.resource_limits else None,
+        created_at=orm.created_at,
+        updated_at=orm.updated_at,
+        deleted_at=orm.deleted_at,
+    )
+
+
+def deployment_from_orm(orm: DeploymentORM) -> Deployment:
+    """Convert deployment ORM to domain model."""
+    return Deployment(
+        deployment_id=orm.deployment_id,
+        application_id=orm.application_id,
+        tenant_id=orm.tenant_id,
+        template_id=orm.template_id,
+        template_version=orm.template_version,
+        resolved_config=orm.resolved_config,
+        status=orm.status,
+        current_step_index=orm.current_step_index,
+        total_steps=orm.total_steps,
+        public_url=orm.public_url,
+        internal_endpoints=orm.internal_endpoints,
+        error_message=orm.error_message,
+        rollback_on_failure=orm.rollback_on_failure,
+        created_at=orm.created_at,
+        started_at=orm.started_at,
+        completed_at=orm.completed_at,
+        metadata=orm.deployment_metadata,
+    )
+
+
+def resource_from_orm(orm: DeployedResourceORM) -> DeployedResource:
+    """Convert deployed resource ORM to domain model."""
+    return DeployedResource(
+        resource_id=orm.resource_id,
+        deployment_id=orm.deployment_id,
+        resource_type=orm.resource_type,
+        external_id=orm.external_id,
+        node_id=orm.node_id,
+        name=orm.name,
+        spec=orm.spec,
+        status=orm.status,
+        health_status=orm.health_status,
+        consecutive_health_failures=orm.consecutive_health_failures,
+        last_health_check_at=orm.last_health_check_at,
+        created_at=orm.created_at,
+    )
+
+
+def step_execution_from_orm(orm: DeploymentStepExecutionORM) -> DeploymentStepExecution:
+    """Convert deployment step ORM to domain model."""
+    return DeploymentStepExecution(
+        step_execution_id=orm.step_execution_id,
+        deployment_id=orm.deployment_id,
+        step_id=orm.step_id,
+        step_name=orm.step_name,
+        execution_id=orm.execution_id,
+        status=orm.status,
+        result=orm.result or {},
+        error_message=orm.error_message,
+        started_at=orm.started_at,
+        completed_at=orm.completed_at,
+        duration_seconds=orm.duration_seconds,
     )
 
 
@@ -152,7 +293,7 @@ class ApplicationTemplateRepository:
             orm = template_to_orm(template)
             session.add(orm)
             session.commit()
-            print(f"[template_repo] created template {template.template_id}")
+            logger.info("[template_repo] created template %s", template.template_id)
         except IntegrityError as e:
             session.rollback()
             raise ExecutionConcurrencyError(f"Template {template.template_id} already exists") from e
@@ -166,47 +307,37 @@ class ApplicationTemplateRepository:
             orm = session.get(ApplicationTemplateORM, template_id)
             if not orm:
                 return None
-            
-            # Convert ORM to domain (simplified - you'd want proper conversion)
-            from execution_engine.domain.models import (
-                ApplicationTemplate, DeploymentStepDefinition,
-                TemplateInputField, ResourceLimits, HealthCheckDefinition
-            )
-            
-            return ApplicationTemplate(
-                template_id=orm.template_id,
-                name=orm.name,
-                description=orm.description,
-                version=orm.version,
-                category=orm.category,
-                icon_url=orm.icon_url,
-                deployment_steps=[
-                    DeploymentStepDefinition(
-                        step_id=step["step_id"],
-                        step_name=step["step_name"],
-                        step_type=step["step_type"],
-                        order=step["order"],
-                        depends_on=step.get("depends_on", []),
-                        spec_template=step.get("spec_template", {}),
-                        health_check=HealthCheckDefinition(**step["health_check"]) if step.get("health_check") else None,
-                        timeout_seconds=step.get("timeout_seconds", 300),
-                        retry_on_failure=step.get("retry_on_failure", True),
-                        max_retries=step.get("max_retries", 3),
-                        cleanup_on_failure=step.get("cleanup_on_failure", True),
-                    )
-                    for step in orm.deployment_steps
-                ],
-                database_required=orm.database_required,
-                database_type=orm.database_type,
-                required_inputs=[
-                    TemplateInputField(**field)
-                    for field in orm.required_inputs
-                ],
-                default_resources=ResourceLimits(**orm.default_resources) if orm.default_resources else None,
-                created_at=orm.created_at,
-                updated_at=orm.updated_at,
-                is_active=orm.is_active,
-            )
+            return template_from_orm(orm)
+        finally:
+            session.close()
+
+    def update(self, template: ApplicationTemplate) -> None:
+        """Update an existing template."""
+        session = self._get_session()
+        try:
+            orm = session.get(ApplicationTemplateORM, template.template_id)
+            if not orm:
+                raise ExecutionConcurrencyError(f"Template {template.template_id} not found")
+
+            updated = template_to_orm(template)
+            orm.name = updated.name
+            orm.description = updated.description
+            orm.version = updated.version
+            orm.category = updated.category
+            orm.icon_url = updated.icon_url
+            orm.deployment_steps = updated.deployment_steps
+            orm.database_required = updated.database_required
+            orm.database_type = updated.database_type
+            orm.required_inputs = updated.required_inputs
+            orm.default_resources = updated.default_resources
+            orm.updated_at = updated.updated_at
+            orm.is_active = updated.is_active
+
+            session.commit()
+            logger.info("[template_repo] updated template %s", template.template_id)
+        except SQLAlchemyError as e:
+            session.rollback()
+            raise ExecutionConcurrencyError(f"Failed to update template: {e}") from e
         finally:
             session.close()
     
@@ -221,16 +352,7 @@ class ApplicationTemplateRepository:
             if category:
                 query = query.filter(ApplicationTemplateORM.category == category)
             
-            orms = query.all()
-            
-            # Convert each ORM to domain model
-            templates = []
-            for orm in orms:
-                template = self.get(orm.template_id)  # Reuse get() for conversion
-                if template:
-                    templates.append(template)
-            
-            return templates
+            return [template_from_orm(orm) for orm in query.all()]
         finally:
             session.close()
 
@@ -255,7 +377,7 @@ class ApplicationRepository:
             orm = application_to_orm(application)
             session.add(orm)
             session.commit()
-            print(f"[app_repo] created application {application.application_id}")
+            logger.info("[app_repo] created application %s", application.application_id)
         except SQLAlchemyError as e:
             session.rollback()
             raise ExecutionConcurrencyError(f"Failed to create application: {e}") from e
@@ -270,27 +392,7 @@ class ApplicationRepository:
             if not orm:
                 return None
             
-            from execution_engine.domain.models import Application, ResourceLimits
-            
-            return Application(
-                application_id=orm.application_id,
-                tenant_id=orm.tenant_id,
-                template_id=orm.template_id,
-                template_version=orm.template_version,
-                name=orm.name,
-                description=orm.description,
-                user_inputs=orm.user_inputs,
-                current_deployment_id=orm.current_deployment_id,
-                status=orm.status,
-                health_status=orm.health_status,
-                domain=orm.domain,
-                public_url=orm.public_url,
-                ssl_enabled=orm.ssl_enabled,
-                resource_limits=ResourceLimits(**orm.resource_limits) if orm.resource_limits else None,
-                created_at=orm.created_at,
-                updated_at=orm.updated_at,
-                deleted_at=orm.deleted_at,
-            )
+            return application_from_orm(orm)
         finally:
             session.close()
     
@@ -312,14 +414,20 @@ class ApplicationRepository:
             orm.deleted_at = application.deleted_at
             
             session.commit()
-            print(f"[app_repo] updated application {application.application_id}")
+            logger.info("[app_repo] updated application %s", application.application_id)
         except SQLAlchemyError as e:
             session.rollback()
             raise ExecutionConcurrencyError(f"Failed to update application: {e}") from e
         finally:
             session.close()
     
-    def list_by_tenant(self, tenant_id: UUID, include_deleted: bool = False) -> List[Application]:
+    def list_by_tenant(
+        self,
+        tenant_id: UUID,
+        include_deleted: bool = False,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> List[Application]:
         """List applications by tenant."""
         session = self._get_session()
         try:
@@ -330,10 +438,8 @@ class ApplicationRepository:
             if not include_deleted:
                 query = query.filter(ApplicationORM.deleted_at.is_(None))
             
-            query = query.order_by(ApplicationORM.created_at.desc())
-            
-            orms = query.all()
-            return [self.get(orm.application_id) for orm in orms if self.get(orm.application_id)]
+            query = query.order_by(ApplicationORM.created_at.desc()).offset(offset).limit(limit)
+            return [application_from_orm(orm) for orm in query.all()]
         finally:
             session.close()
 
@@ -358,7 +464,7 @@ class DeploymentRepository:
             orm = deployment_to_orm(deployment)
             session.add(orm)
             session.commit()
-            print(f"[deployment_repo] created deployment {deployment.deployment_id}")
+            logger.info("[deployment_repo] created deployment %s", deployment.deployment_id)
         except SQLAlchemyError as e:
             session.rollback()
             raise ExecutionConcurrencyError(f"Failed to create deployment: {e}") from e
@@ -372,28 +478,47 @@ class DeploymentRepository:
             orm = session.get(DeploymentORM, deployment_id)
             if not orm:
                 return None
-            
-            from execution_engine.domain.models import Deployment
-            
-            return Deployment(
-                deployment_id=orm.deployment_id,
-                application_id=orm.application_id,
-                tenant_id=orm.tenant_id,
-                template_id=orm.template_id,
-                template_version=orm.template_version,
-                resolved_config=orm.resolved_config,
-                status=orm.status,
-                current_step_index=orm.current_step_index,
-                total_steps=orm.total_steps,
-                public_url=orm.public_url,
-                internal_endpoints=orm.internal_endpoints,
-                error_message=orm.error_message,
-                rollback_on_failure=orm.rollback_on_failure,
-                created_at=orm.created_at,
-                started_at=orm.started_at,
-                completed_at=orm.completed_at,
-                metadata=orm.metadata,
+            return deployment_from_orm(orm)
+        finally:
+            session.close()
+
+    def list_by_application(
+        self,
+        application_id: UUID,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> List[Deployment]:
+        """List deployments for an application."""
+        session = self._get_session()
+        try:
+            orms = (
+                session.query(DeploymentORM)
+                .filter(DeploymentORM.application_id == application_id)
+                .order_by(DeploymentORM.created_at.desc())
+                .offset(offset)
+                .limit(limit)
+                .all()
             )
+            return [deployment_from_orm(orm) for orm in orms]
+        finally:
+            session.close()
+
+    def list_by_status(
+        self,
+        status: DeploymentStatus,
+        limit: int = 100,
+    ) -> List[Deployment]:
+        """List deployments by status."""
+        session = self._get_session()
+        try:
+            orms = (
+                session.query(DeploymentORM)
+                .filter(DeploymentORM.status == status)
+                .order_by(DeploymentORM.created_at.asc())
+                .limit(limit)
+                .all()
+            )
+            return [deployment_from_orm(orm) for orm in orms]
         finally:
             session.close()
     
@@ -412,12 +537,120 @@ class DeploymentRepository:
             orm.error_message = deployment.error_message
             orm.started_at = deployment.started_at
             orm.completed_at = deployment.completed_at
+            orm.deployment_metadata = deployment.metadata
             
             session.commit()
-            print(f"[deployment_repo] updated deployment {deployment.deployment_id}")
+            logger.info("[deployment_repo] updated deployment %s", deployment.deployment_id)
         except SQLAlchemyError as e:
             session.rollback()
             raise ExecutionConcurrencyError(f"Failed to update deployment: {e}") from e
+        finally:
+            session.close()
+
+
+# ============================================
+# DEPLOYMENT STEP REPOSITORY
+# ============================================
+
+class DeploymentStepExecutionRepository:
+    """Repository for deployment step execution records."""
+
+    def __init__(self, session_factory: Optional[sessionmaker] = None):
+        self._session_factory = session_factory or SessionLocal
+
+    def _get_session(self):
+        return self._session_factory()
+
+    def create(self, step: DeploymentStepExecution) -> None:
+        """Create a deployment step execution record."""
+        session = self._get_session()
+        try:
+            orm = DeploymentStepExecutionORM(
+                step_execution_id=step.step_execution_id,
+                deployment_id=step.deployment_id,
+                step_id=step.step_id,
+                step_name=step.step_name,
+                execution_id=step.execution_id,
+                status=step.status,
+                result=step.result,
+                error_message=step.error_message,
+                started_at=step.started_at,
+                completed_at=step.completed_at,
+                duration_seconds=step.duration_seconds,
+            )
+            session.add(orm)
+            session.commit()
+            logger.info("[step_repo] created step %s for deployment %s", step.step_id, step.deployment_id)
+        except SQLAlchemyError as e:
+            session.rollback()
+            raise ExecutionConcurrencyError(f"Failed to create deployment step: {e}") from e
+        finally:
+            session.close()
+
+    def get(self, step_execution_id: UUID) -> Optional[DeploymentStepExecution]:
+        """Get a step execution by ID."""
+        session = self._get_session()
+        try:
+            orm = session.get(DeploymentStepExecutionORM, step_execution_id)
+            return step_execution_from_orm(orm) if orm else None
+        finally:
+            session.close()
+
+    def get_by_deployment_step(
+        self,
+        deployment_id: UUID,
+        step_id: str,
+    ) -> Optional[DeploymentStepExecution]:
+        """Get a step execution by deployment and template step id."""
+        session = self._get_session()
+        try:
+            orm = (
+                session.query(DeploymentStepExecutionORM)
+                .filter(
+                    DeploymentStepExecutionORM.deployment_id == deployment_id,
+                    DeploymentStepExecutionORM.step_id == step_id,
+                )
+                .first()
+            )
+            return step_execution_from_orm(orm) if orm else None
+        finally:
+            session.close()
+
+    def list_by_deployment(self, deployment_id: UUID) -> List[DeploymentStepExecution]:
+        """List step executions for a deployment."""
+        session = self._get_session()
+        try:
+            orms = (
+                session.query(DeploymentStepExecutionORM)
+                .filter(DeploymentStepExecutionORM.deployment_id == deployment_id)
+                .order_by(DeploymentStepExecutionORM.started_at.asc().nullsfirst(), DeploymentStepExecutionORM.step_id.asc())
+                .all()
+            )
+            return [step_execution_from_orm(orm) for orm in orms]
+        finally:
+            session.close()
+
+    def update(self, step: DeploymentStepExecution) -> None:
+        """Update a deployment step execution record."""
+        session = self._get_session()
+        try:
+            orm = session.get(DeploymentStepExecutionORM, step.step_execution_id)
+            if not orm:
+                raise ExecutionConcurrencyError(f"Step execution {step.step_execution_id} not found")
+
+            orm.execution_id = step.execution_id
+            orm.status = step.status
+            orm.result = step.result
+            orm.error_message = step.error_message
+            orm.started_at = step.started_at
+            orm.completed_at = step.completed_at
+            orm.duration_seconds = step.duration_seconds
+
+            session.commit()
+            logger.info("[step_repo] updated step %s -> %s", step.step_id, step.status.value)
+        except SQLAlchemyError as e:
+            session.rollback()
+            raise ExecutionConcurrencyError(f"Failed to update deployment step: {e}") from e
         finally:
             session.close()
 
@@ -457,7 +690,7 @@ class DeployedResourceRepository:
             
             session.add(orm)
             session.commit()
-            print(f"[resource_repo] created resource {resource.resource_id}")
+            logger.info("[resource_repo] created resource %s", resource.resource_id)
         except SQLAlchemyError as e:
             session.rollback()
             raise ExecutionConcurrencyError(f"Failed to create resource: {e}") from e
@@ -468,26 +701,66 @@ class DeployedResourceRepository:
         """Get resource by ID."""
         session = self._get_session()
         try:
-            from execution_engine.infrastructure.postgres.models import DeployedResourceORM
-            
             orm = session.get(DeployedResourceORM, resource_id)
             if not orm:
                 return None
-            
-            return DeployedResource(
-                resource_id=orm.resource_id,
-                deployment_id=orm.deployment_id,
-                resource_type=orm.resource_type,
-                external_id=orm.external_id,
-                node_id=orm.node_id,
-                name=orm.name,
-                spec=orm.spec,
-                status=orm.status,
-                health_status=orm.health_status,
-                consecutive_health_failures=orm.consecutive_health_failures,
-                last_health_check_at=orm.last_health_check_at,
-                created_at=orm.created_at,
+            return resource_from_orm(orm)
+        finally:
+            session.close()
+
+    def list_by_deployment(self, deployment_id: UUID) -> List[DeployedResource]:
+        """List resources for a deployment."""
+        session = self._get_session()
+        try:
+            orms = (
+                session.query(DeployedResourceORM)
+                .filter(DeployedResourceORM.deployment_id == deployment_id)
+                .order_by(DeployedResourceORM.created_at.asc())
+                .all()
             )
+            return [resource_from_orm(orm) for orm in orms]
+        finally:
+            session.close()
+
+    def get_by_execution_id(self, execution_id: UUID) -> Optional[DeployedResource]:
+        """Get the deployed resource created for an execution."""
+        session = self._get_session()
+        try:
+            orm = (
+                session.query(DeployedResourceORM)
+                .filter(DeployedResourceORM.spec["execution_id"].as_string() == str(execution_id))
+                .first()
+            )
+            return resource_from_orm(orm) if orm else None
+        finally:
+            session.close()
+
+    def list_running_containers_for_health_check(
+        self,
+        limit: int = 100,
+    ) -> List[Dict[str, Any]]:
+        """List running container resources with their runtime agent URLs."""
+        session = self._get_session()
+        try:
+            rows = (
+                session.query(DeployedResourceORM, InfrastructureNodeORM.runtime_agent_url)
+                .join(InfrastructureNodeORM, DeployedResourceORM.node_id == InfrastructureNodeORM.node_id)
+                .filter(
+                    DeployedResourceORM.resource_type == ResourceType.CONTAINER,
+                    DeployedResourceORM.status == "running",
+                    DeployedResourceORM.external_id != "pending",
+                )
+                .order_by(DeployedResourceORM.last_health_check_at.asc().nullsfirst())
+                .limit(limit)
+                .all()
+            )
+            return [
+                {
+                    "resource": resource_from_orm(resource_orm),
+                    "runtime_agent_url": runtime_agent_url,
+                }
+                for resource_orm, runtime_agent_url in rows
+            ]
         finally:
             session.close()
     
@@ -509,7 +782,7 @@ class DeployedResourceRepository:
             orm.spec = resource.spec
             
             session.commit()
-            print(f"[resource_repo] updated resource {resource.resource_id}")
+            logger.info("[resource_repo] updated resource %s", resource.resource_id)
         except SQLAlchemyError as e:
             session.rollback()
             raise ExecutionConcurrencyError(f"Failed to update resource: {e}") from e

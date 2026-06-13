@@ -10,16 +10,18 @@ import time
 import logging
 import signal
 import sys
+import threading
 from datetime import datetime, timezone
-from typing import List, Set
+from typing import List
 from uuid import UUID
 
-from execution_engine.domain.models import DeploymentStatus, ApplicationStatus
+from execution_engine.domain.models import DeploymentStatus, ApplicationStatus, StepStatus
 from execution_engine.core.models import ExecutionState
 from execution_engine.container import (
     domain_service,
-    execution_repository,
+    execution_service,
     deployment_repository,
+    step_execution_repository,
 )
 
 # Setup logging
@@ -64,9 +66,9 @@ class StatusUpdater:
         logger.info("=" * 80)
         logger.info("")
         
-        # Register signal handlers
-        signal.signal(signal.SIGINT, self._signal_handler)
-        signal.signal(signal.SIGTERM, self._signal_handler)
+        if threading.current_thread() is threading.main_thread():
+            signal.signal(signal.SIGINT, self._signal_handler)
+            signal.signal(signal.SIGTERM, self._signal_handler)
         
         # Main loop
         while not self._stop_requested:
@@ -80,6 +82,10 @@ class StatusUpdater:
                 time.sleep(self.poll_interval)
         
         logger.info("Status Updater stopped")
+
+    def stop(self):
+        """Request graceful shutdown."""
+        self._stop_requested = True
     
     def _signal_handler(self, signum, frame):
         """Handle shutdown signals."""
@@ -117,20 +123,11 @@ class StatusUpdater:
         Returns:
             List of deployment IDs in DEPLOYING state
         """
-        # Query database for deploying deployments
-        # We use raw SQL here for efficiency
-        from execution_engine.infrastructure.postgres.database import engine
-        from sqlalchemy import text
-        
-        with engine.connect() as conn:
-            result = conn.execute(text("""
-                SELECT deployment_id 
-                FROM deployments 
-                WHERE status = 'DEPLOYING'
-                ORDER BY created_at ASC
-            """))
-            
-            return [row[0] for row in result]
+        deployments = domain_service.list_deployments_by_status(
+            DeploymentStatus.DEPLOYING,
+            limit=100,
+        )
+        return [deployment.deployment_id for deployment in deployments]
     
     def _update_deployment(self, deployment_id: UUID):
         """
@@ -190,7 +187,10 @@ class StatusUpdater:
         
         # Update deployment status if changed
         if new_status and new_status != deployment.status:
+            self._sync_step_statuses(deployment_id, executions)
             self._apply_deployment_status(deployment, new_status, executions)
+        else:
+            self._sync_step_statuses(deployment_id, executions)
     
     def _get_deployment_executions(self, deployment_id: UUID) -> List:
         """
@@ -202,28 +202,7 @@ class StatusUpdater:
         Returns:
             List of executions
         """
-        from execution_engine.infrastructure.postgres.database import engine
-        from sqlalchemy import text
-        
-        with engine.connect() as conn:
-            result = conn.execute(
-                text("""
-                    SELECT execution_id, state, error_message
-                    FROM executions
-                    WHERE deployment_id = :deployment_id
-                    ORDER BY created_at ASC
-                """),
-                {"deployment_id": deployment_id}
-            )
-            
-            executions = []
-            for row in result:
-                # Get full execution object
-                execution = execution_repository.get(row[0])
-                if execution:
-                    executions.append(execution)
-            
-            return executions
+        return execution_service.list_deployment_executions(deployment_id, limit=100)
     
     def _apply_deployment_status(self, deployment, new_status: DeploymentStatus, executions: List):
         """
@@ -243,6 +222,7 @@ class StatusUpdater:
         
         if new_status == DeploymentStatus.RUNNING:
             deployment.completed_at = datetime.now(timezone.utc)
+            deployment.current_step_index = deployment.total_steps
         
         elif new_status == DeploymentStatus.FAILED:
             deployment.completed_at = datetime.now(timezone.utc)
@@ -288,10 +268,42 @@ class StatusUpdater:
                 f"{application.status.value} → {new_app_status.value}"
             )
             
-            application.status = new_app_status
-            domain_service._app_repo.update(application)
+            domain_service.set_application_status(application_id, new_app_status)
             
             logger.info(f"[app:{application_id}] ✅ Application status updated")
+
+    def _sync_step_statuses(self, deployment_id: UUID, executions: List) -> None:
+        """Reflect async execution state onto linked deployment step records."""
+        execution_by_id = {
+            execution.execution_id: execution
+            for execution in executions
+        }
+        steps = step_execution_repository.list_by_deployment(deployment_id)
+        now = datetime.now(timezone.utc)
+
+        for step in steps:
+            if not step.execution_id:
+                continue
+
+            execution = execution_by_id.get(step.execution_id)
+            if not execution:
+                continue
+
+            if execution.state == ExecutionState.COMPLETED and step.status != StepStatus.COMPLETED:
+                step.status = StepStatus.COMPLETED
+                step.result = execution.deployment_result or step.result
+                step.completed_at = now
+            elif execution.state == ExecutionState.FAILED and step.status != StepStatus.FAILED:
+                step.status = StepStatus.FAILED
+                step.error_message = execution.error_message
+                step.completed_at = now
+            else:
+                continue
+
+            if step.started_at:
+                started_at = step.started_at.replace(tzinfo=timezone.utc) if step.started_at.tzinfo is None else step.started_at
+                step.duration_seconds = (now - started_at).total_seconds()
+            step_execution_repository.update(step)
 
 
 def main():

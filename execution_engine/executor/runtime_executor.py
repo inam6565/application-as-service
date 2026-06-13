@@ -53,6 +53,10 @@ class RuntimeExecutor:
         
         if not container_spec:
             raise ExecutionValidationError("container_spec required in spec")
+
+        container_spec = dict(container_spec)
+        if "env" in container_spec and "environment" not in container_spec:
+            container_spec["environment"] = container_spec.pop("env")
         
         # Get runtime agent URL from node manager
         # For now, we'll expect it in the spec
